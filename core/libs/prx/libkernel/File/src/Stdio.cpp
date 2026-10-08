@@ -400,6 +400,13 @@ int APS5_VABI stat_nid_postfix(const char* path, FileStat* sb) {
     return PosixResult(sceKernelStat(path, sb));
 }
 
+int APS5_VABI lstat_nid_postfix(const char* path, FileStat* sb) {
+    if (sb == nullptr) return PosixFailure(GUEST_EFAULT);
+    if (const int error = PathError(path)) return PosixFailure(error);
+    if (!File::FillLinkStat(ResolvePath_nid_no_patch(path), sb)) return PosixResult(SceErrorFromErrno(errno));
+    return 0;
+}
+
 int APS5_VABI unlink_nid_postfix(const char* path) {
     if (const int error = PathError(path)) return PosixFailure(error);
     return PosixResult(sceKernelUnlink(path));

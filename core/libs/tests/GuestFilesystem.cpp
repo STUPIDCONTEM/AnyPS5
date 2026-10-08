@@ -35,6 +35,7 @@ int APS5_VABI open_nid_postfix(const char*, int, int);
 int APS5_VABI _open_nid_postfix(const char*, int, ...);
 int APS5_VABI close_nid_postfix(int);
 int APS5_VABI stat_nid_postfix(const char*, FileStat*);
+int APS5_VABI lstat_nid_postfix(const char*, FileStat*);
 int APS5_VABI unlink_nid_postfix(const char*);
 int APS5_VABI rmdir_nid_postfix(const char*);
 int APS5_VABI mkdir_nid_postfix(const char*, unsigned short);
@@ -245,6 +246,27 @@ int main() {
     Require(stat_nid_postfix("", &status) == -1 && *__error_nid_postfix() == 2);
     Require(stat_nid_postfix(nullptr, &status) == -1 && *__error_nid_postfix() == 14);
     Require(stat_nid_postfix(presentName.c_str(), nullptr) == -1 && *__error_nid_postfix() == 14);
+    FileStat linkStatus{};
+    Require(lstat_nid_postfix(presentName.c_str(), &linkStatus) == 0 && linkStatus.st_size == 5);
+    Require((linkStatus.st_mode & 0170000) == 0100000 && linkStatus.st_ino == status.st_ino);
+    Require(lstat_nid_postfix(rootName.c_str(), &linkStatus) == 0 && (linkStatus.st_mode & 0170000) == 0040000);
+    Require(lstat_nid_postfix(missingName.c_str(), &linkStatus) == -1 && *__error_nid_postfix() == 2);
+    Require(lstat_nid_postfix("", &linkStatus) == -1 && *__error_nid_postfix() == 2);
+    Require(lstat_nid_postfix(nullptr, &linkStatus) == -1 && *__error_nid_postfix() == 14);
+    Require(lstat_nid_postfix(presentName.c_str(), nullptr) == -1 && *__error_nid_postfix() == 14);
+#ifndef _WIN32
+    const auto link = root / "link";
+    std::filesystem::create_symlink("present.txt", link);
+    Require(lstat_nid_postfix(link.string().c_str(), &linkStatus) == 0);
+    Require((linkStatus.st_mode & 0170000) == 0120000 && linkStatus.st_size == 11);
+    Require(stat_nid_postfix(link.string().c_str(), &status) == 0 && (status.st_mode & 0170000) == 0100000);
+    const auto dangling = root / "dangling";
+    std::filesystem::create_symlink("missing.txt", dangling);
+    Require(lstat_nid_postfix(dangling.string().c_str(), &linkStatus) == 0 && (linkStatus.st_mode & 0170000) == 0120000);
+    Require(stat_nid_postfix(dangling.string().c_str(), &status) == -1 && *__error_nid_postfix() == 2);
+    Require(lstat_nid_postfix((root / "present.txt" / "child").string().c_str(), &linkStatus) == -1 && *__error_nid_postfix() == 20);
+    Require(unlink_nid_postfix(link.string().c_str()) == 0 && unlink_nid_postfix(dangling.string().c_str()) == 0);
+#endif
     const int opened = open_nid_postfix(presentName.c_str(), 0, 0);
     Require(opened >= 0 && close_nid_postfix(opened) == 0);
     const int reopened = _open_nid_postfix(presentName.c_str(), 0);

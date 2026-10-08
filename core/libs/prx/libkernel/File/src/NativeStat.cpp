@@ -1,5 +1,6 @@
 #include "prx/libkernel/File/include/NativeStat.hpp"
 #include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
+#include "prx/libc/include/General.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -21,6 +22,11 @@ static int DoFstat(int fd, NativeStat* st) {
     if (const auto directory = File::DirectoryDescriptorPath(fd)) return DoStat(*directory, st);
     return _fstat64(fd, st);
 }
+static int DoLstat(const std::filesystem::path& p, NativeStat* st) {
+    std::error_code error;
+    if (std::filesystem::is_symlink(std::filesystem::symlink_status(p, error))) NotImplemented_nid_no_patch("lstat of a Windows symbolic link");
+    return DoStat(p, st);
+}
 #else
 #if defined(__linux__)
 #include <fcntl.h>
@@ -32,6 +38,9 @@ static int DoStat(const std::filesystem::path& p, NativeStat* st) {
 }
 static int DoFstat(int fd, NativeStat* st) {
     return ::fstat(fd, st);
+}
+static int DoLstat(const std::filesystem::path& p, NativeStat* st) {
+    return ::lstat(p.c_str(), st);
 }
 #endif
 
@@ -147,6 +156,13 @@ bool FillFileStatFromDescriptor(int fd, FileStat* sb) {
 #else
     CopyNativeStat(st, sb);
 #endif
+    return true;
+}
+
+bool FillLinkStat(const std::filesystem::path& nativePath, FileStat* sb) {
+    NativeStat st{};
+    if (DoLstat(nativePath, &st) != 0) return false;
+    CopyNativeStat(st, sb);
     return true;
 }
 
