@@ -8,6 +8,8 @@
 extern "C" {
 int APS5_VABI socket_nid_postfix(int, int, int);
 int APS5_VABI fcntl_nid_postfix(int, int, ...);
+int APS5_VABI listen_nid_postfix(int, int);
+int APS5_VABI accept_nid_postfix(int, void*, std::uint32_t*);
 int APS5_VABI setsockopt_nid_postfix(int, int, int, const void*, std::uint32_t);
 int APS5_VABI getsockopt_nid_postfix(int, int, int, void*, std::uint32_t*);
 int APS5_VABI bind_nid_postfix(int, const void*, std::uint32_t);
@@ -42,6 +44,11 @@ int main() {
     const int receiver = socket_nid_postfix(2, 2, 0);
     const int sender = socket_nid_postfix(2, 2, 17);
     Require(receiver >= 0 && sender >= 0 && receiver != sender);
+    Require(listen_nid_postfix(receiver, 4) == -1 && *__error_nid_postfix() == 45);
+    Require(accept_nid_postfix(receiver, nullptr, nullptr) == -1 && *__error_nid_postfix() == 22);
+    const int closed = socket_nid_postfix(2, 2, 17);
+    Require(closed >= 0 && close_nid_postfix(closed) == 0);
+    Require(accept_nid_postfix(closed, nullptr, nullptr) == -1 && *__error_nid_postfix() == 9);
     std::array<unsigned char, 16> destination{16, 2, 0, 0, 127, 0, 0, 1};
     Require(bind_nid_postfix(receiver, destination.data(), destination.size()) == 0);
     std::uint32_t size = destination.size();
