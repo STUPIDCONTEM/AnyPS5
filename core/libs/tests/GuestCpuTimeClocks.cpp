@@ -1,11 +1,15 @@
 #include "SceTypes.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
+#include <stdexcept>
 
 extern "C" {
 int APS5_VABI clock_gettime_nid_postfix(int clockId, KernelTimespec* tp);
 int APS5_VABI clock_getres_nid_postfix(int clockId, KernelTimespec* res);
+int* APS5_VABI __error_nid_postfix();
 int APS5_VABI sceKernelClockGettime(KernelClockid clockId, KernelTimespec* tp);
 int APS5_VABI sceKernelClockGetres(KernelClockid clockId, KernelTimespec* tp);
 int APS5_VABI sceKernelUsleep_nid_postfix(KernelUseconds microseconds);
@@ -14,7 +18,6 @@ int APS5_VABI scePthreadJoin(Pthread thread, void** retval);
 }
 
 static constexpr int SCE_OK = 0;
-static constexpr int SCE_KERNEL_ERROR_EFAULT = static_cast<int>(0x8002000E);
 
 static constexpr int GUEST_CLOCK_MONOTONIC = 4;
 static constexpr int GUEST_CLOCK_THREAD_CPUTIME_ID = 14;
@@ -97,6 +100,85 @@ static void ProcessClockCountsOtherThreads() {
     Require(Nanos(GUEST_CLOCK_THREAD_CPUTIME_ID) - threadStart <= BURN_NANOS / 2);
 }
 
+static void InvalidPositiveClockIdsReturnEinval() {
+    constexpr int invalidClockIds[] = {3, 6, 16, 17, std::numeric_limits<std::int32_t>::max()};
+    for (const int clockId : invalidClockIds) {
+        KernelTimespec time{1234, 5678};
+        *__error_nid_postfix() = 71;
+        Require(clock_gettime_nid_postfix(clockId, &time) == -1);
+        Require(*__error_nid_postfix() == 22);
+        Require(time.tv_sec == 1234 && time.tv_nsec == 5678);
+
+        KernelTimespec resolution{4321, 8765};
+        *__error_nid_postfix() = 72;
+        Require(clock_getres_nid_postfix(clockId, &resolution) == -1);
+        Require(*__error_nid_postfix() == 22);
+        Require(resolution.tv_sec == 4321 && resolution.tv_nsec == 8765);
+
+        KernelTimespec sceTime{1234, 5678};
+        *__error_nid_postfix() = 73;
+        Require(sceKernelClockGettime(static_cast<KernelClockid>(clockId), &sceTime) == SCE_KERNEL_ERROR_EINVAL);
+        Require(*__error_nid_postfix() == 73);
+        Require(sceTime.tv_sec == 1234 && sceTime.tv_nsec == 5678);
+
+        KernelTimespec sceResolution{4321, 8765};
+        *__error_nid_postfix() = 74;
+        Require(sceKernelClockGetres(static_cast<KernelClockid>(clockId), &sceResolution) == SCE_KERNEL_ERROR_EINVAL);
+        Require(*__error_nid_postfix() == 74);
+        Require(sceResolution.tv_sec == 4321 && sceResolution.tv_nsec == 8765);
+    }
+}
+
+static void UnsupportedProcessClockEncodingStillThrows() {
+    KernelTimespec time{1234, 5678};
+    bool timeThrew = false;
+    try {
+        (void)clock_gettime_nid_postfix(-1, &time);
+    } catch (const std::runtime_error&) {
+        timeThrew = true;
+    }
+    Require(timeThrew && time.tv_sec == 1234 && time.tv_nsec == 5678);
+
+    KernelTimespec resolution{4321, 8765};
+    bool resolutionThrew = false;
+    try {
+        (void)clock_getres_nid_postfix(-1, &resolution);
+    } catch (const std::runtime_error&) {
+        resolutionThrew = true;
+    }
+    Require(resolutionThrew && resolution.tv_sec == 4321 && resolution.tv_nsec == 8765);
+
+    timeThrew = false;
+    try {
+        (void)sceKernelClockGettime(static_cast<KernelClockid>(-1), &time);
+    } catch (const std::runtime_error&) {
+        timeThrew = true;
+    }
+    Require(timeThrew && time.tv_sec == 1234 && time.tv_nsec == 5678);
+
+    resolutionThrew = false;
+    try {
+        (void)sceKernelClockGetres(static_cast<KernelClockid>(-1), &resolution);
+    } catch (const std::runtime_error&) {
+        resolutionThrew = true;
+    }
+    Require(resolutionThrew && resolution.tv_sec == 4321 && resolution.tv_nsec == 8765);
+}
+
+static void RecognizedWallAndMonotonicClocksStillWork() {
+    constexpr int clockIds[] = {0, GUEST_CLOCK_MONOTONIC};
+    for (const int clockId : clockIds) {
+        KernelTimespec time{-1, -1};
+        Require(clock_gettime_nid_postfix(clockId, &time) == SCE_OK);
+        Require(time.tv_sec >= 0 && time.tv_nsec >= 0 && time.tv_nsec < NANOS_PER_SECOND);
+
+        KernelTimespec resolution{-1, -1};
+        Require(clock_getres_nid_postfix(clockId, &resolution) == SCE_OK);
+        Require(resolution.tv_sec >= 0 && resolution.tv_nsec >= 0 && resolution.tv_nsec < NANOS_PER_SECOND);
+        Require(resolution.tv_sec != 0 || resolution.tv_nsec != 0);
+    }
+}
+
 int main() {
     KernelTimespec time{-1, -1};
     Require(sceKernelClockGettime(GUEST_CLOCK_THREAD_CPUTIME_ID, &time) == SCE_OK);
@@ -114,4 +196,8 @@ int main() {
     BusyThreadAccumulatesCpuTime();
     SleepingThreadAccumulatesNone();
     ProcessClockCountsOtherThreads();
+
+    InvalidPositiveClockIdsReturnEinval();
+    UnsupportedProcessClockEncodingStillThrows();
+    RecognizedWallAndMonotonicClocksStillWork();
 }
