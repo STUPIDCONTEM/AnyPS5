@@ -259,6 +259,15 @@ int main() {
     std::filesystem::create_symlink("present.txt", link);
     Require(lstat_nid_postfix(link.string().c_str(), &linkStatus) == 0);
     Require((linkStatus.st_mode & 0170000) == 0120000 && linkStatus.st_size == 11);
+#if defined(__linux__) && defined(SYS_statx) && defined(STATX_BTIME) && defined(AT_STATX_SYNC_AS_STAT) && defined(AT_SYMLINK_NOFOLLOW)
+    struct statx linkBirth{};
+    const auto linkName = link.string();
+    if (::syscall(SYS_statx, AT_FDCWD, linkName.c_str(), AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT, STATX_BTIME, &linkBirth) == 0 &&
+        (linkBirth.stx_mask & STATX_BTIME) != 0) {
+        Require(linkStatus.st_birthtim.tv_sec == static_cast<std::int64_t>(linkBirth.stx_btime.tv_sec) &&
+                linkStatus.st_birthtim.tv_nsec == static_cast<std::int64_t>(linkBirth.stx_btime.tv_nsec));
+    }
+#endif
     Require(stat_nid_postfix(link.string().c_str(), &status) == 0 && (status.st_mode & 0170000) == 0100000);
     const auto dangling = root / "dangling";
     std::filesystem::create_symlink("missing.txt", dangling);
