@@ -79,6 +79,9 @@ static bool CheckWidePrecision() {
 
 #ifndef _WIN32
 static void AsprintfTranslatesHostEilseqToGuestNumber() {
+    void* defaultAllocatorApi[10]{};
+    ApplicationHeapRegister_nid_no_patch(defaultAllocatorApi);
+
     const char* activeLocale = std::setlocale(LC_CTYPE, nullptr);
     const std::string savedLocale = activeLocale ? activeLocale : "C";
     Require(std::setlocale(LC_CTYPE, "C") != nullptr);

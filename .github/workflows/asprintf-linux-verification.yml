@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: true
-          fetch-depth: 3
+          fetch-depth: 0
 
       - name: Install Vulkan loader used by the project build
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers
