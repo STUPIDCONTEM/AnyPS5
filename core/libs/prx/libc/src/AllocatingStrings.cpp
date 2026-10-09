@@ -54,6 +54,7 @@ int APS5_VABI asprintf_nid_postfix(char** destination, const char* format, ...) 
 #else
         char* text = nullptr;
         const int count = ::vasprintf(&text, format, args);
+        if (count < 0 && errno == EILSEQ) errno = 86;
         std::unique_ptr<char, decltype(&std::free)> owner(text, std::free);
         const char* source = text;
 #endif
