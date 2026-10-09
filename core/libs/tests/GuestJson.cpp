@@ -1,4 +1,6 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include <cmath>
+#include <clocale>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -97,6 +99,75 @@ static void Check(bool value, int line) {
 
 enum : std::int32_t { TypeNull, TypeBoolean, TypeInteger, TypeUInteger, TypeReal, TypeString, TypeArray, TypeObject };
 
+static std::string Serialize(Value& value);
+
+static double ParseReal(const std::string& text) {
+    Value value{};
+    _ZN3sce4Json5ValueC1Ev(&value);
+    Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&value, text.data(), text.size()) == 0);
+    Require(_ZNK3sce4Json5Value7getTypeEv(&value) == TypeReal);
+    const double result = *_ZNK3sce4Json5Value7getRealEv(&value);
+    _ZN3sce4Json5ValueD1Ev(&value);
+    return result;
+}
+
+static void CheckRealRoundTrip(double value) {
+    Value original{};
+    _ZN3sce4Json5ValueC1Ed(&original, value);
+    const std::string serialized = Serialize(original);
+    Value parsed{};
+    _ZN3sce4Json5ValueC1Ev(&parsed);
+    Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&parsed, serialized.data(), serialized.size()) == 0);
+    Require(_ZNK3sce4Json5Value7getTypeEv(&parsed) == TypeReal);
+    const double reparsed = *_ZNK3sce4Json5Value7getRealEv(&parsed);
+    Require(reparsed == value && std::signbit(reparsed) == std::signbit(value));
+    Require(Serialize(parsed) == serialized);
+    _ZN3sce4Json5ValueD1Ev(&parsed);
+    _ZN3sce4Json5ValueD1Ev(&original);
+}
+
+static bool SetCommaDecimalLocale() {
+    for (const char* name : {"German_Germany.1252", "de-DE", "de_DE.UTF-8", "de_DE.utf8", "French_France.1252", "fr-FR", "fr_FR.UTF-8", "fr_FR.utf8"}) {
+        if (std::setlocale(LC_NUMERIC, name) != nullptr && std::strcmp(std::localeconv()->decimal_point, ",") == 0) return true;
+    }
+    return false;
+}
+
+static void LocaleIndependentNumbers() {
+    const char* currentLocale = std::setlocale(LC_NUMERIC, nullptr);
+    Require(currentLocale != nullptr);
+    const std::string savedLocale = currentLocale;
+    Require(std::setlocale(LC_NUMERIC, "C") != nullptr);
+    Require(ParseReal("1.5") == 1.5);
+    Require(ParseReal("1.25e-2") == 0.0125);
+    const double positiveUnderflow = ParseReal("1e-324");
+    const double negativeUnderflow = ParseReal("-1e-324");
+    Require(positiveUnderflow == 0.0 && !std::signbit(positiveUnderflow));
+    Require(negativeUnderflow == 0.0 && std::signbit(negativeUnderflow));
+    Require(ParseReal("2.5e-324") == std::numeric_limits<double>::denorm_min());
+    Require(std::signbit(ParseReal("-0.0")));
+    CheckRealRoundTrip(1.5);
+    CheckRealRoundTrip(1.25e-2);
+    CheckRealRoundTrip(1.25e30);
+    CheckRealRoundTrip(std::numeric_limits<double>::denorm_min());
+    CheckRealRoundTrip(std::numeric_limits<double>::max());
+    Value negativeZero{};
+    _ZN3sce4Json5ValueC1Ed(&negativeZero, -0.0);
+    Require(Serialize(negativeZero) == "-0");
+    _ZN3sce4Json5ValueD1Ev(&negativeZero);
+
+    if (SetCommaDecimalLocale()) {
+        Require(ParseReal("1.5") == 1.5);
+        Require(ParseReal("1.25e-2") == 0.0125);
+        Require(std::signbit(ParseReal("-0.0")));
+        CheckRealRoundTrip(1.5);
+        CheckRealRoundTrip(1.25e-2);
+        CheckRealRoundTrip(1.25e30);
+        CheckRealRoundTrip(std::numeric_limits<double>::denorm_min());
+        CheckRealRoundTrip(std::numeric_limits<double>::max());
+    }
+    Require(std::setlocale(LC_NUMERIC, savedLocale.c_str()) != nullptr);
+}
 static Value fallback{};
 static int callbackCalls = 0;
 static std::int32_t lastRequested = -1;
@@ -396,6 +467,7 @@ static void ValueClear() {
 }
 
 int main() {
+    LocaleIndependentNumbers();
     ParseAndRoundTrip();
     NestingDepth();
     ObjectsAndArrays();
