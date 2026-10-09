@@ -2,12 +2,14 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cstdarg>
 #include <cstdint>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 
 extern "C" int APS5_VABI vswprintf_nid_postfix(char16_t*, std::size_t, const char16_t*, VaList*);
 extern "C" int APS5_VABI snwprintf_s_nid_postfix(char16_t*, std::size_t, const char16_t*, ...);
+extern "C" int APS5_VABI wprintf_nid_postfix(const char16_t*, ...);
 
 static int APS5_VABI Format(char16_t* buffer, std::size_t size, const char16_t* format, ...) {
 #ifdef _WIN32
@@ -88,6 +90,27 @@ static void CheckBounded() {
     Require(Format(buffer, 16, u"%s", nullNarrow) == 6 && buffer == std::u16string(u"(null)"), "vswprintf null %s argument");
 }
 
+static void CheckEncodingErrors() {
+    const char* malformed[] = {"\x80", "\xff", "\xc0\xaf", "\xe0\x80\xaf", "\xf0\x80\x80\xaf", "\xed\xa0\x80", "\xf4\x90\x80\x80", "\xe2\x82", "\xe2" "A"};
+    for (const char* input : malformed) {
+        char16_t buffer[16] = {u'x'};
+        errno = 0;
+        Require(Format(buffer, 16, u"%s", input) < 0, "invalid UTF-8 %s conversion");
+        Require(errno == 86, "invalid UTF-8 sets guest EILSEQ");
+        Require(buffer[0] == 0, "invalid UTF-8 clears output");
+        buffer[0] = u'x';
+        Require(snwprintf_s_nid_postfix(buffer, 16, u"%s", input) < 0 && buffer[0] == 0, "secure formatter catches encoding failure");
+        errno = 0;
+        Require(wprintf_nid_postfix(u"%s", input) < 0 && errno == 86, "wprintf reports guest EILSEQ");
+    }
+    const char noTerminator[] = {static_cast<char>(0xc0)};
+    char16_t buffer[16]{};
+    Require(Format(buffer, 16, u"%.0s", noTerminator) == 0, "zero precision does not inspect input");
+    const char afterPrecision[] = {'A', static_cast<char>(0xc0)};
+    Require(Format(buffer, 16, u"%.1s", afterPrecision) == 1 && buffer[0] == u'A' && buffer[1] == 0,
+            "precision does not inspect trailing input");
+}
+
 static void CheckCount() {
     char16_t buffer[16];
     int count = -7;
@@ -114,6 +137,7 @@ static void CheckCount() {
 int main() {
     CheckBounded();
     CheckCount();
+    CheckEncodingErrors();
     Check(u"%.2s", "\xc3\xa9\xc3\xa8", u"\u00e9\u00e8");
     Check(u"%.1s", "\xc3\xa9\xc3\xa8", u"\u00e9");
     Check(u"%.0s", "\xc3\xa9", u"");
@@ -125,4 +149,6 @@ int main() {
     Check(u"%.2s", "\xf0\x9f\x98\x80x", u"\U0001f600");
     Check(u"%.1s", "\xf0\x9f\x98\x80x", u"");
     Check(u"%.3s", "\xf0\x9f\x98\x80x", u"\U0001f600x");
+    Check(u"%s", "\xef\xbf\xbf", u"\uffff");
+    Check(u"%s", "\xf4\x8f\xbf\xbf", u"\U0010ffff");
 }
