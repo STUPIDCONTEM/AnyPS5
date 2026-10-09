@@ -126,6 +126,21 @@ static void CheckRealRoundTrip(double value) {
     _ZN3sce4Json5ValueD1Ev(&original);
 }
 
+static void NumericNulTermination() {
+    const std::string terminalNul("1.5\0", 4);
+    Require(ParseReal(terminalNul) == 1.5);
+
+    Value output{};
+    _ZN3sce4Json5ValueC1Ev(&output);
+    const std::string prior = "true";
+    Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&output, prior.data(), prior.size()) == 0);
+    const std::string trailingData("1.5\0garbage", 11);
+    Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&output, trailingData.data(), trailingData.size()) < 0);
+    Require(_ZNK3sce4Json5Value7getTypeEv(&output) == TypeBoolean);
+    Require(*_ZNK3sce4Json5Value10getBooleanEv(&output));
+    _ZN3sce4Json5ValueD1Ev(&output);
+}
+
 static bool SetCommaDecimalLocale() {
     for (const char* name : {"German_Germany.1252", "de-DE", "de_DE.UTF-8", "de_DE.utf8", "French_France.1252", "fr-FR", "fr_FR.UTF-8", "fr_FR.utf8"}) {
         if (std::setlocale(LC_NUMERIC, name) != nullptr && std::strcmp(std::localeconv()->decimal_point, ",") == 0) return true;
@@ -138,6 +153,7 @@ static void LocaleIndependentNumbers() {
     Require(currentLocale != nullptr);
     const std::string savedLocale = currentLocale;
     Require(std::setlocale(LC_NUMERIC, "C") != nullptr);
+    NumericNulTermination();
     Require(ParseReal("1.5") == 1.5);
     Require(ParseReal("1.25e-2") == 0.0125);
     const double positiveUnderflow = ParseReal("1e-324");
@@ -157,6 +173,7 @@ static void LocaleIndependentNumbers() {
     _ZN3sce4Json5ValueD1Ev(&negativeZero);
 
     if (SetCommaDecimalLocale()) {
+        NumericNulTermination();
         Require(ParseReal("1.5") == 1.5);
         Require(ParseReal("1.25e-2") == 0.0125);
         Require(std::signbit(ParseReal("-0.0")));
