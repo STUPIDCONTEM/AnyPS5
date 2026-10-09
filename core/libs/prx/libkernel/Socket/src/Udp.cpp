@@ -305,14 +305,27 @@ int APS5_VABI accept_nid_postfix(int descriptor, void* address, std::uint32_t* l
     const auto listener = Lookup(descriptor);
     if (!listener) return -1;
     if (listener->type != 1 || (address && !length)) return Fail(22);
+    bool nonblocking;
+    {
+        std::lock_guard lock(listener->modeMutex);
+        nonblocking = listener->nonblocking;
+    }
     sockaddr_storage peer{};
     socklen_t size = sizeof(peer);
     const auto native = ::accept(listener->value, address ? reinterpret_cast<sockaddr*>(&peer) : nullptr,
         address ? &size : nullptr);
     if (native == Invalid) return Fail(NativeError());
     Socket guard(native, listener->family, listener->type);
+#ifdef _WIN32
+    unsigned long enabled = nonblocking;
+    if (ioctlsocket(native, FIONBIO, &enabled)) return Fail(NativeError());
+#else
+    int enabled = nonblocking;
+    if (::ioctl(native, FIONBIO, &enabled)) return Fail(NativeError());
+#endif
     try {
         auto accepted = std::make_shared<Socket>(native, listener->family, listener->type);
+        accepted->nonblocking = nonblocking;
         guard.value = Invalid;
         std::lock_guard lock(socketsMutex);
         if (nextDescriptor == INT_MAX) return Fail(24);

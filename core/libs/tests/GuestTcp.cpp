@@ -2,15 +2,20 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
+
+struct PollDescriptor { int descriptor; short events; short revents; };
 
 extern "C" {
 int APS5_VABI socket_nid_postfix(int, int, int);
+int APS5_VABI poll_nid_postfix(PollDescriptor*, std::uint32_t, int);
 int APS5_VABI bind_nid_postfix(int, const void*, std::uint32_t);
 int APS5_VABI listen_nid_postfix(int, int);
 int APS5_VABI getsockname_nid_postfix(int, void*, std::uint32_t*);
 int APS5_VABI connect_nid_postfix(int, const void*, std::uint32_t);
 int APS5_VABI accept_nid_postfix(int, void*, std::uint32_t*);
+int APS5_VABI fcntl_nid_postfix(int, int, ...);
 std::int64_t APS5_VABI send_nid_postfix(int, const void*, std::uint64_t, int);
 std::int64_t APS5_VABI recv_nid_postfix(int, void*, std::uint64_t, int);
 int APS5_VABI getpeername_nid_postfix(int, void*, std::uint32_t*);
@@ -18,9 +23,10 @@ int APS5_VABI close_nid_postfix(int);
 int* APS5_VABI __error_nid_postfix();
 }
 
-static void Require(bool condition) {
-    if (!condition) std::abort();
+static void Check(bool condition, int line) {
+    if (!condition) { std::fprintf(stderr, "TCP check failed at line %d\n", line); std::abort(); }
 }
+#define Require(value) Check((value), __LINE__)
 
 int main() {
     const int listener = socket_nid_postfix(2, 1, 6);
@@ -41,6 +47,7 @@ int main() {
     address_size = peer.size();
     const int accepted = accept_nid_postfix(listener, peer.data(), &address_size);
     Require(accepted >= 0 && address_size == 16 && peer[1] == 2);
+    Require(fcntl_nid_postfix(accepted, 3) == 2);
 
     std::array<std::uint8_t, 16> connected_peer{};
     address_size = connected_peer.size();
@@ -53,6 +60,40 @@ int main() {
     Require(send_nid_postfix(client, request, sizeof(request), 0x20000) == sizeof(request));
     Require(recv_nid_postfix(accepted, received, sizeof(received), 0) == sizeof(received));
     Require(std::strcmp(request, received) == 0);
+
+    const int nonblocking_listener = socket_nid_postfix(2, 1, 6);
+    Require(nonblocking_listener >= 0);
+    std::array<std::uint8_t, 16> nonblocking_address{16, 2, 0, 0, 127, 0, 0, 1};
+    Require(bind_nid_postfix(nonblocking_listener, nonblocking_address.data(), nonblocking_address.size()) == 0);
+    Require(listen_nid_postfix(nonblocking_listener, 4) == 0);
+    address_size = nonblocking_address.size();
+    Require(getsockname_nid_postfix(nonblocking_listener, nonblocking_address.data(), &address_size) == 0);
+    Require(fcntl_nid_postfix(nonblocking_listener, 4, 6) == 0);
+    Require(fcntl_nid_postfix(nonblocking_listener, 3) == 6);
+
+    const int nonblocking_client = socket_nid_postfix(2, 1, 0);
+    Require(nonblocking_client >= 0);
+    Require(connect_nid_postfix(nonblocking_client, nonblocking_address.data(), nonblocking_address.size()) == 0);
+    PollDescriptor pending{nonblocking_listener, 1, 0};
+    Require(poll_nid_postfix(&pending, 1, 1000) == 1 && pending.revents == 1);
+    const int nonblocking_accepted = accept_nid_postfix(nonblocking_listener, nullptr, nullptr);
+    Require(nonblocking_accepted >= 0);
+    Require(fcntl_nid_postfix(nonblocking_accepted, 3) == 6);
+    char no_data = 0;
+    Require(recv_nid_postfix(nonblocking_accepted, &no_data, 1, 0) == -1 && *__error_nid_postfix() == 35);
+    Require(fcntl_nid_postfix(nonblocking_accepted, 4, 2) == 0);
+    Require(fcntl_nid_postfix(nonblocking_accepted, 3) == 2);
+    Require(fcntl_nid_postfix(nonblocking_listener, 3) == 6);
+    Require(send_nid_postfix(nonblocking_client, request, sizeof(request), 0) == sizeof(request));
+    Require(recv_nid_postfix(nonblocking_accepted, received, sizeof(received), 0) == sizeof(received));
+    Require(std::strcmp(request, received) == 0);
+    Require(fcntl_nid_postfix(nonblocking_accepted, 4, 6) == 0);
+    Require(fcntl_nid_postfix(nonblocking_listener, 4, 2) == 0);
+    Require(fcntl_nid_postfix(nonblocking_accepted, 3) == 6);
+    Require(recv_nid_postfix(nonblocking_accepted, &no_data, 1, 0) == -1 && *__error_nid_postfix() == 35);
+    Require(close_nid_postfix(nonblocking_accepted) == 0);
+    Require(close_nid_postfix(nonblocking_client) == 0);
+    Require(close_nid_postfix(nonblocking_listener) == 0);
 
     Require(close_nid_postfix(accepted) == 0);
 #ifndef _WIN32
