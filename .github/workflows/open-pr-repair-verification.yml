@@ -1,0 +1,188 @@
+name: Open PR repair verification
+
+on:
+  push:
+    branches: [ci/open-pr-repair-verification]
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Install lavapipe for GPU execution tests
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+          -DANYPS5_ENABLE_SPIRV_TOOLS=ON
+
+      - name: Check test registration
+        run: python3 tools/check_test_registration.py build
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Build guest libraries
+        run: cmake --build build --target libs
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure --timeout 120 --repeat until-fail:3 --parallel 4 --output-log ctest.log
+        env:
+          ANYPS5_REQUIRE_VULKAN: 1
+          GALLIUM_OVERRIDE_CPU_CAPS: avx
+
+      - name: Report tests slower than 30 s
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          [ -f ctest.log ] || exit 0
+          awk '/Test +#[0-9]+: / && $NF == "sec" { for (i = 1; i <= NF; i++) if ($i ~ /^#[0-9]+:$/) name = $(i + 1); t = $(NF - 1) + 0; if (t > max[name]) max[name] = t }
+            END { for (name in max) if (max[name] > 30) printf "::warning title=Slow test::%s took %.1f s on %s; tests must finish in 30 s (CONTRIBUTING.md)\n", name, max[name], ENVIRON["RUNNER_OS"] }' ctest.log
+
+
+
+  live-pr-conventions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: d70b89989473ba1f6ae13e44e079e67f1f8a44b0
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate current live PR metadata with trusted main checker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import tempfile
+          import urllib.request
+          from pathlib import Path
+
+          repository = "boykopovar/AnyPS5"
+          trusted_main = "d70b89989473ba1f6ae13e44e079e67f1f8a44b0"
+          expected_heads = {
+              2029: "458e7e42bd777f5dd3caeb8ecdcd1367b05fe7d7",
+              2030: "7ea7f59a5f78b62c1d511957e47025ea98877048",
+              2049: "56c1a570ab48537ed882d85b22c7d17ab4282cb6",
+              2050: "971ddae50dea6c69f4fe6a4cecdeaaab04ccddf2",
+              2057: "9c43709c39a6de7a007fd0cdd66f9531b299caef",
+              2064: "f10e8648219dffecc8737736b2eacbef4f2dd220",
+              2067: "db490ded0ed30f60e321a74753db37dffa4befca",
+              2071: "1bf710872d435d2773ed76e9168d0e7145c818bf",
+              2072: "eb7508928974dbdb869c345c342d60f37575aef4",
+              2079: "9f222416e00e353db7d37f847af69312d49a8008",
+              2080: "d2859a707a54358e12650be8e13bf633cf71dee7",
+              2086: "e93782c27f4a62343ed4990f79eae82d497b0e09",
+              2089: "e6ce5c882c4252bfc16c95b981f81d927b25f4b3",
+              2094: "c0564b21724dcac3f8419a59b65976ac8a8ca350",
+              2104: "0e8d65d7583ba092ca3c6216a5c5929d3d3be73d",
+              2109: "d8d7e7e49148bd0d07f9887258bf3e2ae9fcf76f",
+              2111: "81b0142dfdeef12d405c8d4c88594dd9a7324560",
+              2115: "ec647f09c00a775f37110021e49b7ec6a7e9a591",
+              2116: "bdf47cd2beba31eb8129a7658d0f4832cb266906",
+          }
+          token = os.environ["GITHUB_TOKEN"]
+          pull_requests = {}
+          problems = []
+          for number, expected_sha in expected_heads.items():
+              request = urllib.request.Request(
+                  f"https://api.github.com/repos/{repository}/pulls/{number}",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "open-pr-repair-verification",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  pr = json.load(response)
+              if pr.get("state") != "open" or pr.get("base", {}).get("ref") != "main":
+                  problems.append(f"PR #{number} is not open against main")
+                  continue
+              live_sha = pr.get("head", {}).get("sha")
+              if live_sha != expected_sha:
+                  problems.append(
+                      f"PR #{number} head drifted: expected {expected_sha}, got {live_sha}"
+                  )
+                  continue
+              pull_requests[number] = pr
+
+          if problems:
+              for problem in problems:
+                  print(f"::error::{problem}")
+              sys.exit(1)
+
+          refspecs = [
+              f"+refs/pull/{number}/head:refs/remotes/verify/pr/{number}"
+              for number in expected_heads
+          ]
+          subprocess.run(
+              ["git", "fetch", "--no-tags", f"https://github.com/{repository}.git", *refspecs],
+              check=True,
+          )
+          failed = False
+          with tempfile.TemporaryDirectory() as temporary_directory:
+              for number, expected_sha in expected_heads.items():
+                  ref = f"refs/remotes/verify/pr/{number}"
+                  fetched_sha = subprocess.check_output(
+                      ["git", "rev-parse", ref], text=True
+                  ).strip()
+                  if fetched_sha != expected_sha:
+                      print(
+                          f"::error::PR #{number} fetch drifted: expected {expected_sha}, got {fetched_sha}"
+                      )
+                      failed = True
+                      continue
+                  event_path = Path(temporary_directory) / f"pr-{number}.json"
+                  event_path.write_text(
+                      json.dumps(
+                          {
+                              "pull_request": {
+                                  "title": pull_requests[number]["title"],
+                                  "body": pull_requests[number].get("body") or "",
+                              }
+                          },
+                          ensure_ascii=False,
+                      ),
+                      encoding="utf-8",
+                  )
+                  print(f"Checking live metadata and changes for PR #{number} at {expected_sha}")
+                  checker_environment = os.environ.copy()
+                  checker_environment["GITHUB_REPOSITORY"] = repository
+                  checker_environment.pop("GITHUB_TOKEN", None)
+                  result = subprocess.run(
+                      [
+                          sys.executable,
+                          "tools/check_conventions.py",
+                          "--base",
+                          trusted_main,
+                          "--head",
+                          ref,
+                          "--event",
+                          str(event_path),
+                      ],
+                      check=False,
+                      env=checker_environment,
+                  )
+                  failed |= result.returncode != 0
+          sys.exit(1 if failed else 0)
+          PY
