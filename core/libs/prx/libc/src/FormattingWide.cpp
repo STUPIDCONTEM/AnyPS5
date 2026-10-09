@@ -27,19 +27,30 @@ bool In(char16_t character, const char* set) {
     return character != 0 && character < 128 && std::strchr(set, static_cast<char>(character)) != nullptr;
 }
 
+class EncodingError : public std::invalid_argument {
+public:
+    EncodingError() : std::invalid_argument("Invalid UTF-8 sequence") {}
+};
+
 void AppendUtf16(std::u16string& out, const char* text, std::size_t limit) {
-    for (std::size_t index = 0; out.size() < limit && text[index] != '\0';) {
+    for (std::size_t index = 0; out.size() < limit;) {
         const unsigned char lead = static_cast<unsigned char>(text[index]);
-        std::size_t extra = lead >= 0xf0 ? 3 : lead >= 0xe0 ? 2 : lead >= 0xc0 ? 1 : 0;
-        std::uint32_t code = extra == 3 ? lead & 0x07 : extra == 2 ? lead & 0x0f : extra == 1 ? lead & 0x1f : lead;
-        std::size_t used = 1;
-        for (; used <= extra; ++used) {
-            const unsigned char next = static_cast<unsigned char>(text[index + used]);
-            if ((next & 0xc0) != 0x80) { extra = 0; code = lead; used = 1; break; }
+        if (lead == 0) break;
+        std::size_t extra = 0;
+        std::uint32_t code = 0;
+        std::uint32_t minimum = 0;
+        if (lead <= 0x7f) code = lead;
+        else if (lead >= 0xc2 && lead <= 0xdf) { extra = 1; code = lead & 0x1f; minimum = 0x80; }
+        else if (lead >= 0xe0 && lead <= 0xef) { extra = 2; code = lead & 0x0f; minimum = 0x800; }
+        else if (lead >= 0xf0 && lead <= 0xf4) { extra = 3; code = lead & 0x07; minimum = 0x10000; }
+        else throw EncodingError();
+        for (std::size_t offset = 1; offset <= extra; ++offset) {
+            const unsigned char next = static_cast<unsigned char>(text[index + offset]);
+            if (next == 0 || (next & 0xc0) != 0x80) throw EncodingError();
             code = (code << 6) | (next & 0x3f);
         }
-        if (extra != 0) used = extra + 1;
-        index += used;
+        if (code < minimum || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) throw EncodingError();
+        index += extra + 1;
         if (code >= 0x10000) {
             if (limit - out.size() < 2) break;
             code -= 0x10000;
@@ -207,6 +218,10 @@ int APS5_VABI vswprintf_nid_postfix(char16_t* buffer, std::size_t size, const ch
         std::memcpy(buffer, text.data(), copied * sizeof(char16_t));
         buffer[copied] = 0;
         return copied == text.size() ? static_cast<int>(copied) : -1;
+    } catch (const EncodingError&) {
+        buffer[0] = 0;
+        errno = 86;
+        return -1;
     } catch (const std::exception&) {
         buffer[0] = 0;
         errno = 22;
@@ -242,6 +257,8 @@ int APS5_VABI wprintf_nid_postfix(const char16_t* format, ...) {
         const std::u16string text = FormatWide(format, reinterpret_cast<VaList*>(args));
         const std::string bytes = ToUtf8(text);
         if (std::fwrite(bytes.data(), 1, bytes.size(), stdout) == bytes.size()) result = static_cast<int>(text.size());
+    } catch (const EncodingError&) {
+        errno = 86;
     } catch (const std::exception&) {
         errno = 22;
     }
