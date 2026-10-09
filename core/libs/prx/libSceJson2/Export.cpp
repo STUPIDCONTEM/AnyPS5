@@ -1,9 +1,13 @@
 #include <cerrno>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstddef>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <locale.h>
+#include <limits>
 #include <list>
 #include <mutex>
 #include <stdexcept>
@@ -217,8 +221,50 @@ void AppendEscaped(std::string& out, const std::string& text) {
 std::string RealText(double value) {
     if (!std::isfinite(value)) throw std::runtime_error("sce::Json: cannot serialize a non-finite number");
     char buffer[32];
-    std::snprintf(buffer, sizeof(buffer), "%.17g", value);
-    return buffer;
+    const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value, std::chars_format::general,
+                                      std::numeric_limits<double>::max_digits10);
+    if (result.ec != std::errc{}) throw std::runtime_error("sce::Json: cannot serialize a number");
+    return std::string(buffer, result.ptr);
+}
+
+class NumericCLocale {
+public:
+    NumericCLocale() {
+#if defined(_WIN32)
+        numericLocale = _create_locale(LC_NUMERIC, "C");
+#else
+        numericLocale = newlocale(LC_NUMERIC_MASK, "C", nullptr);
+#endif
+        if (numericLocale == nullptr) throw std::runtime_error("sce::Json: cannot create C numeric locale");
+    }
+    NumericCLocale(const NumericCLocale&) = delete;
+    NumericCLocale& operator=(const NumericCLocale&) = delete;
+
+    ~NumericCLocale() {
+#if defined(_WIN32)
+        _free_locale(numericLocale);
+#else
+        freelocale(numericLocale);
+#endif
+    }
+    double Parse(const char* text, char** end) const {
+#if defined(_WIN32)
+        return _strtod_l(text, end, numericLocale);
+#else
+        return strtod_l(text, end, numericLocale);
+#endif
+    }
+private:
+#if defined(_WIN32)
+    _locale_t numericLocale = nullptr;
+#else
+    locale_t numericLocale = nullptr;
+#endif
+};
+
+const NumericCLocale& CLocale() {
+    static const NumericCLocale locale;
+    return locale;
 }
 
 void Serialize(std::string& out, const Node& n) {
@@ -371,7 +417,9 @@ private:
                 }
             }
         }
-        const double real = std::strtod(text.c_str(), nullptr);
+        char* end = nullptr;
+        const double real = CLocale().Parse(text.c_str(), &end);
+        if (end != text.c_str() + text.size()) return false;
         if (!std::isfinite(real)) throw std::runtime_error("sce::Json::Parser::parse: number " + text + " overflows a double; the console's behaviour is unverified");
         out.type = TypeReal;
         out.real = real;
