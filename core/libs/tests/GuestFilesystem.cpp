@@ -25,6 +25,7 @@ int APS5_VABI sceKernelChmod_nid_postfix(const char*, unsigned short);
 int APS5_VABI sceKernelFchmod(int, unsigned short);
 int APS5_VABI fchmod_nid_postfix(int, int);
 int APS5_VABI futimes_nid_postfix(int, const KernelTimeval*);
+int APS5_VABI utimes_nid_postfix(const char*, const KernelTimeval*);
 int APS5_VABI socket_nid_postfix(int, int, int);
 int APS5_VABI sceKernelFsync(int);
 int APS5_VABI sceKernelWriteThrottlingStatus(std::uint64_t*);
