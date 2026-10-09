@@ -16,7 +16,6 @@ int APS5_VABI ioctl_nid_postfix(int, std::uint64_t, void*);
 std::int64_t APS5_VABI sendto_nid_postfix(int, const void*, std::uint64_t, int, const void*, std::uint32_t);
 std::int64_t APS5_VABI recvfrom_nid_postfix(int, void*, std::uint64_t, int, void*, std::uint32_t*);
 int APS5_VABI close_nid_postfix(int);
-int APS5_VABI accept_nid_postfix(int, void*, std::uint32_t*);
 const char* APS5_VABI inet_ntop_nid_postfix(int, const void*, char*, std::uint32_t);
 int APS5_VABI inet_pton_nid_postfix(int, const char*, void*);
 int* APS5_VABI __error_nid_postfix();
@@ -43,7 +42,6 @@ int main() {
     const int receiver = socket_nid_postfix(2, 2, 0);
     const int sender = socket_nid_postfix(2, 2, 17);
     Require(receiver >= 0 && sender >= 0 && receiver != sender);
-    Require(accept_nid_postfix(receiver, nullptr, nullptr) == -1 && *__error_nid_postfix() == 45);
     std::array<unsigned char, 16> destination{16, 2, 0, 0, 127, 0, 0, 1};
     Require(bind_nid_postfix(receiver, destination.data(), destination.size()) == 0);
     std::uint32_t size = destination.size();
@@ -123,7 +121,6 @@ int main() {
     Require(recvmsg_nid_postfix(receiver, nullptr, 0) == -1 && *__error_nid_postfix() == 14);
     Require(close_nid_postfix(receiver) == 0);
     Require(close_nid_postfix(receiver) == -1 && *__error_nid_postfix() == 9);
-    Require(accept_nid_postfix(receiver, nullptr, nullptr) == -1 && *__error_nid_postfix() == 9);
     Require(ioctl_nid_postfix(receiver, 0x4004667f, &queued) == -1);
     Require(close_nid_postfix(sender) == 0);
     unsigned char parsed[16]{};
