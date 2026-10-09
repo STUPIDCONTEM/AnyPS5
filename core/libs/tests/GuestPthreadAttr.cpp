@@ -1,7 +1,10 @@
 #include "SceTypes.hpp"
 #include <cstddef>
 #include <cstdlib>
+#include <cstdio>
 #include <future>
+#include <initializer_list>
+#include <limits>
 
 extern "C" {
 int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg, const char* name);
@@ -33,6 +36,7 @@ static constexpr KernelCpumask UPDATED_AFFINITY = 0x1000;
 static constexpr std::size_t STACK_SIZE = 2u << 20;
 static constexpr std::size_t MIN_STACK_SIZE = 16384;
 static constexpr int GUEST_EINVAL = 22;
+static constexpr int GUEST_ENOTSUP = 45;
 
 static void Require(bool value) { if (!value) std::abort(); }
 
@@ -46,6 +50,9 @@ struct ReportedAttributes {
 extern "C" {
 int APS5_VABI pthread_attr_setstack_nid_postfix(PthreadAttr* attr, void* addr, std::size_t size);
 int APS5_VABI pthread_attr_getstack_nid_postfix(const PthreadAttr* attr, void** addr, std::size_t* size);
+int APS5_VABI pthread_attr_setschedpolicy_nid_postfix(PthreadAttr* attr, int policy);
+int APS5_VABI pthread_attr_getschedpolicy_nid_postfix(const PthreadAttr* attr, int* policy);
+int* APS5_VABI __error_nid_postfix();
 }
 
 static ReportedAttributes Query(Pthread thread) {
@@ -61,6 +68,36 @@ static ReportedAttributes Query(Pthread thread) {
     Require(scePthreadAttrGetdetachstate(&attr, &reported.detachState) == SCE_OK);
     Require(scePthreadAttrDestroy(&attr) == SCE_OK);
     return reported;
+}
+
+static void CheckSchedulingPolicyValidation() {
+    PthreadAttr attr = nullptr;
+    *__error_nid_postfix() = 123;
+    Require(pthread_attr_setschedpolicy_nid_postfix(nullptr, 0) == GUEST_EINVAL);
+    Require(pthread_attr_setschedpolicy_nid_postfix(&attr, 0) == GUEST_EINVAL);
+    Require(*__error_nid_postfix() == 123);
+    Require(scePthreadAttrInit(&attr) == SCE_OK);
+    int policy = -1;
+    Require(pthread_attr_getschedpolicy_nid_postfix(&attr, &policy) == SCE_OK && policy == 1);
+    for (const int supported : {1, 2, 3}) {
+        Require(pthread_attr_setschedpolicy_nid_postfix(&attr, supported) == SCE_OK);
+        policy = -1;
+        Require(pthread_attr_getschedpolicy_nid_postfix(&attr, &policy) == SCE_OK && policy == supported);
+    }
+    const int rejected[] = {std::numeric_limits<int>::min(), -1, 0, 4, std::numeric_limits<int>::max()};
+    for (const int unsupported : rejected) {
+        const int previous = policy;
+        *__error_nid_postfix() = 123;
+        const int result = pthread_attr_setschedpolicy_nid_postfix(&attr, unsupported);
+        if (result != GUEST_ENOTSUP) std::fprintf(stderr, "policy %d: expected ENOTSUP %d, got %d\n", unsupported, GUEST_ENOTSUP, result);
+        Require(result == GUEST_ENOTSUP);
+        Require(*__error_nid_postfix() == 123);
+        policy = -1;
+        Require(pthread_attr_getschedpolicy_nid_postfix(&attr, &policy) == SCE_OK && policy == previous);
+    }
+    Require(scePthreadAttrDestroy(&attr) == SCE_OK);
+    Require(pthread_attr_setschedpolicy_nid_postfix(&attr, 0) == GUEST_EINVAL);
+    Require(*__error_nid_postfix() == 123);
 }
 
 static void CheckStackSizeLimit() {
@@ -82,6 +119,7 @@ static void* APS5_VABI Worker(void* arg) {
 }
 
 int main() {
+    CheckSchedulingPolicyValidation();
     CheckStackSizeLimit();
     PthreadAttr attr = nullptr;
     Require(scePthreadAttrInit(&attr) == SCE_OK);
