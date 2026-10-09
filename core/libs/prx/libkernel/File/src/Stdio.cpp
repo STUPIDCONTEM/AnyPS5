@@ -230,6 +230,7 @@ static constexpr int GUEST_EIO = 5;
 static constexpr int GUEST_EBADF = 9;
 static constexpr int GUEST_EFAULT = 14;
 static constexpr int GUEST_EEXIST = 17;
+static constexpr int GUEST_EISDIR = 21;
 static constexpr int GUEST_EINVAL = 22;
 static constexpr int GUEST_ENAMETOOLONG = 63;
 static constexpr int GUEST_ENOTDIR = 20;
@@ -709,6 +710,8 @@ int APS5_VABI sceKernelTruncate_nid_postfix(const char* path, std::int64_t lengt
     const auto native = ResolvePath_nid_no_patch(path);
     std::error_code error;
     if (!std::filesystem::exists(native, error)) return SceErrorFromErrno(GUEST_ENOENT);
+    const auto status = std::filesystem::status(native, error);
+    if (!error && std::filesystem::is_directory(status)) return SceErrorFromErrno(GUEST_EISDIR);
     std::filesystem::resize_file(native, static_cast<std::uintmax_t>(length), error);
     if (error) return SceErrorFromErrno(GUEST_EIO);
     RecordWrittenPath_nid_no_patch(native);

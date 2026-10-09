@@ -121,7 +121,19 @@ int main() {
     Require(std::filesystem::file_size(sized) == 6);
     { std::ifstream stream(sized); std::string contents; std::getline(stream, contents);
       Require(contents == "012345"); }
+    Require(sceKernelTruncate_nid_postfix(sized.string().c_str(), 20) == 0);
+    Require(std::filesystem::file_size(sized) == 20);
+    { std::ifstream stream(sized, std::ios::binary); std::string contents; std::getline(stream, contents);
+      Require(contents == std::string("012345") + std::string(14, '\0')); }
     Require(sceKernelTruncate_nid_postfix((sized / "missing").string().c_str(), 6) == static_cast<int>(0x80020002u));
+    const auto resizeDirectory = root / "resize-directory";
+    Require(std::filesystem::create_directory(resizeDirectory));
+    *__error_nid_postfix() = 123;
+    Require(sceKernelTruncate_nid_postfix(resizeDirectory.string().c_str(), -1) == static_cast<int>(0x80020016u));
+    Require(*__error_nid_postfix() == 123);
+    Require(sceKernelTruncate_nid_postfix(resizeDirectory.string().c_str(), 0) == static_cast<int>(0x80020015u));
+    Require(*__error_nid_postfix() == 123 && std::filesystem::is_directory(resizeDirectory));
+    Require(std::filesystem::remove(resizeDirectory));
     Require(sceKernelUtimes_nid_postfix(sized.string().c_str(), nullptr) == 0);
     std::FILE* native = std::fopen(sized.string().c_str(), "r+b");
     Require(native != nullptr);
