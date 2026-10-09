@@ -57,6 +57,7 @@ int APS5_VABI pthread_condattr_init_nid_postfix(PthreadCondattr* attr) {
 
 int APS5_VABI pthread_condattr_setclock_nid_postfix(PthreadCondattr* attr, KernelClockid clock_id) {
     if (!attr || !*attr) return PosixThread::GUEST_EINVAL;
+    if (clock_id != 0 && clock_id != 1 && clock_id != 2 && clock_id != 4) return PosixThread::GUEST_EINVAL;
     return toPosix(scePthreadCondattrSetclock(attr, clock_id));
 }
 
