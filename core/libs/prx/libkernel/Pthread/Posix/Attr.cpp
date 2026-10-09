@@ -12,6 +12,10 @@ int APS5_VABI scePthreadAttrSetstacksize(PthreadAttr* attr, std::size_t stacksiz
 int APS5_VABI scePthreadAttrSetstack(PthreadAttr* attr, void* addr, std::size_t size);
 }
 
+static constexpr int GUEST_ENOTSUP = 45;
+static constexpr int GUEST_SCHED_FIFO = 1;
+static constexpr int GUEST_SCHED_RR = 3;
+
 static bool Valid(const PthreadAttr* attr) {
     return attr && *attr;
 }
@@ -102,6 +106,7 @@ int APS5_VABI pthread_attr_setschedparam_nid_postfix(PthreadAttr* attr, const Ke
 
 int APS5_VABI pthread_attr_setschedpolicy_nid_postfix(PthreadAttr* attr, int policy) {
     if (!Valid(attr)) return PosixThread::GUEST_EINVAL;
+    if (policy < GUEST_SCHED_FIFO || policy > GUEST_SCHED_RR) return GUEST_ENOTSUP;
     (*attr)->_schedpolicy = policy;
     return 0;
 }
