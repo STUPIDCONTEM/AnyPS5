@@ -5,6 +5,9 @@
 #include <string>
 #if defined(__linux__)
 #include <cerrno>
+#include <sys/syscall.h>
+#include <sys/sysmacros.h>
+#include <unistd.h>
 #endif
 
 #ifdef _WIN32
@@ -33,11 +36,17 @@ static int DoFstat(int fd, NativeStat* st) {
 #endif
 
 #if defined(__linux__)
-static bool BirthTime(const std::filesystem::path& path, KernelTimespec* birthTime) {
+#if defined(SYS_statx) && defined(STATX_BTIME) && defined(STATX_BASIC_STATS) && defined(STATX_INO) && defined(AT_STATX_SYNC_AS_STAT) && defined(AT_EMPTY_PATH)
+#define APS5_HAS_LINUX_STATX_BTIME 1
+static bool BirthTime(int directory, const char* path, int flags, const NativeStat& native, KernelTimespec* birthTime) {
     const int savedErrno = errno;
     struct statx info{};
-    const bool available = ::statx(AT_FDCWD, path.c_str(), AT_STATX_SYNC_AS_STAT, STATX_BTIME, &info) == 0 &&
-                           (info.stx_mask & STATX_BTIME) != 0;
+    const auto mask = static_cast<unsigned int>(STATX_BASIC_STATS | STATX_BTIME);
+    const bool available = ::syscall(SYS_statx, directory, path, flags | AT_STATX_SYNC_AS_STAT, mask, &info) == 0 &&
+                           (info.stx_mask & (STATX_INO | STATX_BTIME)) == (STATX_INO | STATX_BTIME) &&
+                           info.stx_ino == static_cast<decltype(info.stx_ino)>(native.st_ino) &&
+                           info.stx_dev_major == static_cast<unsigned int>(major(native.st_dev)) &&
+                           info.stx_dev_minor == static_cast<unsigned int>(minor(native.st_dev));
     if (available) {
         birthTime->tv_sec = static_cast<std::int64_t>(info.stx_btime.tv_sec);
         birthTime->tv_nsec = static_cast<std::int64_t>(info.stx_btime.tv_nsec);
@@ -45,19 +54,7 @@ static bool BirthTime(const std::filesystem::path& path, KernelTimespec* birthTi
     errno = savedErrno;
     return available;
 }
-
-static bool BirthTime(int descriptor, KernelTimespec* birthTime) {
-    const int savedErrno = errno;
-    struct statx info{};
-    const bool available = ::statx(descriptor, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT, STATX_BTIME, &info) == 0 &&
-                           (info.stx_mask & STATX_BTIME) != 0;
-    if (available) {
-        birthTime->tv_sec = static_cast<std::int64_t>(info.stx_btime.tv_sec);
-        birthTime->tv_nsec = static_cast<std::int64_t>(info.stx_btime.tv_nsec);
-    }
-    errno = savedErrno;
-    return available;
-}
+#endif
 #endif
 
 static void CopyNativeStat(const NativeStat& st, FileStat* sb, const KernelTimespec* birthTime = nullptr) {
@@ -120,9 +117,9 @@ void FillFileStat(const std::filesystem::path& nativePath, FileStat* sb) {
     if (DoStat(nativePath, &st) != 0) {
         throw std::runtime_error(std::string("FillFileStat: stat failed for ") + nativePath.string());
     }
-#if defined(__linux__)
+#if defined(APS5_HAS_LINUX_STATX_BTIME)
     KernelTimespec birthTime{};
-    CopyNativeStat(st, sb, BirthTime(nativePath, &birthTime) ? &birthTime : nullptr);
+    CopyNativeStat(st, sb, BirthTime(AT_FDCWD, nativePath.c_str(), 0, st, &birthTime) ? &birthTime : nullptr);
 #else
     CopyNativeStat(st, sb);
 #endif
@@ -133,9 +130,9 @@ void FillFileStat(int nativeDescriptor, FileStat* sb) {
     if (DoFstat(nativeDescriptor, &st) != 0) {
         throw std::runtime_error(std::string("FillFileStat: fstat failed for fd ") + std::to_string(nativeDescriptor));
     }
-#if defined(__linux__)
+#if defined(APS5_HAS_LINUX_STATX_BTIME)
     KernelTimespec birthTime{};
-    CopyNativeStat(st, sb, BirthTime(nativeDescriptor, &birthTime) ? &birthTime : nullptr);
+    CopyNativeStat(st, sb, BirthTime(nativeDescriptor, "", AT_EMPTY_PATH, st, &birthTime) ? &birthTime : nullptr);
 #else
     CopyNativeStat(st, sb);
 #endif
@@ -144,9 +141,9 @@ void FillFileStat(int nativeDescriptor, FileStat* sb) {
 bool FillFileStatFromDescriptor(int fd, FileStat* sb) {
     NativeStat st{};
     if (DoFstat(fd, &st) != 0) return false;
-#if defined(__linux__)
+#if defined(APS5_HAS_LINUX_STATX_BTIME)
     KernelTimespec birthTime{};
-    CopyNativeStat(st, sb, BirthTime(fd, &birthTime) ? &birthTime : nullptr);
+    CopyNativeStat(st, sb, BirthTime(fd, "", AT_EMPTY_PATH, st, &birthTime) ? &birthTime : nullptr);
 #else
     CopyNativeStat(st, sb);
 #endif
