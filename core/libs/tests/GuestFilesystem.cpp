@@ -57,6 +57,14 @@ static void Check(bool value, int line) {
     }
 }
 #define Require(value) Check((value), __LINE__)
+#ifdef __linux__
+static void RequireBirthTime(bool value, const char* description) {
+    if (!value) {
+        std::fprintf(stderr, "Linux birthtime regression: %s\n", description);
+        std::abort();
+    }
+}
+#endif
 int main() {
     Require(sceKernelDebugOutText(-1, "text") == static_cast<int>(0x80020016u));
     std::uint64_t throttling[4] = {1, 2, 3, 4};
@@ -179,6 +187,9 @@ int main() {
     FileStat status{};
     Require(stat_nid_postfix(presentName.c_str(), &status) == 0 && status.st_size == 5);
 #ifdef __linux__
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    const KernelTimeval seededTimes[2]{{1000000000, 0}, {1000000000, 0}};
+    Require(utimes_nid_postfix(presentName.c_str(), seededTimes) == 0);
     errno = E2BIG;
     Require(stat_nid_postfix(presentName.c_str(), &status) == 0);
     Require(errno == E2BIG);
@@ -194,10 +205,12 @@ int main() {
         Require(sceKernelFstat(birthDescriptor, &descriptorBefore) == 0);
         Require(errno == E2BIG);
         errno = 0;
-        Require(status.st_birthtim.tv_sec == static_cast<std::int64_t>(before.stx_btime.tv_sec) &&
-                status.st_birthtim.tv_nsec == static_cast<std::int64_t>(before.stx_btime.tv_nsec));
-        Require(descriptorBefore.st_birthtim.tv_sec == static_cast<std::int64_t>(before.stx_btime.tv_sec) &&
-                descriptorBefore.st_birthtim.tv_nsec == static_cast<std::int64_t>(before.stx_btime.tv_nsec));
+        RequireBirthTime(status.st_birthtim.tv_sec == static_cast<std::int64_t>(before.stx_btime.tv_sec) &&
+                         status.st_birthtim.tv_nsec == static_cast<std::int64_t>(before.stx_btime.tv_nsec),
+                         "path stat did not match native STATX_BTIME");
+        RequireBirthTime(descriptorBefore.st_birthtim.tv_sec == static_cast<std::int64_t>(before.stx_btime.tv_sec) &&
+                         descriptorBefore.st_birthtim.tv_nsec == static_cast<std::int64_t>(before.stx_btime.tv_nsec),
+                         "descriptor stat did not match native STATX_BTIME");
         std::this_thread::sleep_for(std::chrono::seconds(1));
         const KernelTimeval oldTimes[2]{{1000000000, 0}, {1000000000, 0}};
         Require(utimes_nid_postfix(presentName.c_str(), oldTimes) == 0);
@@ -209,14 +222,17 @@ int main() {
         Require(::syscall(SYS_statx, AT_FDCWD, presentName.c_str(), AT_STATX_SYNC_AS_STAT, STATX_BTIME, &after) == 0 &&
                 (after.stx_mask & STATX_BTIME) != 0);
         Require(after.stx_btime.tv_sec == before.stx_btime.tv_sec && after.stx_btime.tv_nsec == before.stx_btime.tv_nsec);
-        Require(updated.st_birthtim.tv_sec == static_cast<std::int64_t>(after.stx_btime.tv_sec) &&
-                updated.st_birthtim.tv_nsec == static_cast<std::int64_t>(after.stx_btime.tv_nsec));
-        Require(descriptorUpdated.st_birthtim.tv_sec == static_cast<std::int64_t>(after.stx_btime.tv_sec) &&
-                descriptorUpdated.st_birthtim.tv_nsec == static_cast<std::int64_t>(after.stx_btime.tv_nsec));
+        RequireBirthTime(updated.st_birthtim.tv_sec == static_cast<std::int64_t>(after.stx_btime.tv_sec) &&
+                         updated.st_birthtim.tv_nsec == static_cast<std::int64_t>(after.stx_btime.tv_nsec),
+                         "path stat birthtime changed after utimes");
+        RequireBirthTime(descriptorUpdated.st_birthtim.tv_sec == static_cast<std::int64_t>(after.stx_btime.tv_sec) &&
+                         descriptorUpdated.st_birthtim.tv_nsec == static_cast<std::int64_t>(after.stx_btime.tv_nsec),
+                         "descriptor stat birthtime changed after utimes");
         Require(updated.st_ctim.tv_sec != updated.st_birthtim.tv_sec || updated.st_ctim.tv_nsec != updated.st_birthtim.tv_nsec);
         Require(close_nid_postfix(birthDescriptor) == 0);
     } else {
-        Require(status.st_birthtim.tv_sec == -1 && status.st_birthtim.tv_nsec == 0);
+        RequireBirthTime(status.st_birthtim.tv_sec == -1 && status.st_birthtim.tv_nsec == 0,
+                         "path stat did not report unavailable birthtime as {-1, 0}");
         const int birthDescriptor = open_nid_postfix(presentName.c_str(), 0, 0);
         Require(birthDescriptor >= 0);
         FileStat descriptorStatus{};
@@ -224,11 +240,13 @@ int main() {
         Require(sceKernelFstat(birthDescriptor, &descriptorStatus) == 0);
         Require(errno == E2BIG);
         errno = 0;
-        Require(descriptorStatus.st_birthtim.tv_sec == -1 && descriptorStatus.st_birthtim.tv_nsec == 0);
+        RequireBirthTime(descriptorStatus.st_birthtim.tv_sec == -1 && descriptorStatus.st_birthtim.tv_nsec == 0,
+                         "descriptor stat did not report unavailable birthtime as {-1, 0}");
         Require(close_nid_postfix(birthDescriptor) == 0);
     }
 #else
-    Require(status.st_birthtim.tv_sec == -1 && status.st_birthtim.tv_nsec == 0);
+    RequireBirthTime(status.st_birthtim.tv_sec == -1 && status.st_birthtim.tv_nsec == 0,
+                     "path stat did not report unavailable birthtime as {-1, 0}");
     const int birthDescriptor = open_nid_postfix(presentName.c_str(), 0, 0);
     Require(birthDescriptor >= 0);
     FileStat descriptorStatus{};
@@ -236,7 +254,8 @@ int main() {
     Require(sceKernelFstat(birthDescriptor, &descriptorStatus) == 0);
     Require(errno == E2BIG);
     errno = 0;
-    Require(descriptorStatus.st_birthtim.tv_sec == -1 && descriptorStatus.st_birthtim.tv_nsec == 0);
+    RequireBirthTime(descriptorStatus.st_birthtim.tv_sec == -1 && descriptorStatus.st_birthtim.tv_nsec == 0,
+                     "descriptor stat did not report unavailable birthtime as {-1, 0}");
     Require(close_nid_postfix(birthDescriptor) == 0);
 #endif
 #endif
