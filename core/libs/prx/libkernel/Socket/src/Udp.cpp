@@ -315,7 +315,8 @@ int APS5_VABI listen_nid_postfix(int descriptor, int backlog) {
 int APS5_VABI accept_nid_postfix(int descriptor, void* address, std::uint32_t* length) {
     const auto listener = Lookup(descriptor);
     if (!listener) return -1;
-    if (listener->type != 1 || (address && !length)) return Fail(22);
+    if (listener->type != 1) return Fail(45);
+    if (address && !length) return Fail(22);
     bool nonblocking;
     {
         std::lock_guard lock(listener->modeMutex);
