@@ -12,6 +12,7 @@
 #endif
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
+#include "prx/libkernel/Socket/include/SocketError.hpp"
 #include <algorithm>
 #include <chrono>
 #include <climits>
@@ -90,6 +91,16 @@ int NativeError() {
         default: return 5;
     }
 #endif
+}
+
+int ConnectError() {
+#ifdef _WIN32
+    const int nativeError = WSAGetLastError();
+#else
+    const int nativeError = errno;
+#endif
+    const int guestError = GuestSockets::PendingConnectError(nativeError);
+    return guestError == -1 ? NativeError() : guestError;
 }
 struct Socket {
     NativeSocket value;
@@ -293,7 +304,7 @@ int APS5_VABI connect_nid_postfix(int descriptor, const void* address, std::uint
     socklen_t size;
     if (!Address(address, length, native, size)) return -1;
     if (native.ss_family != (socket->family == 2 ? AF_INET : AF_INET6)) return Fail(47);
-    return ::connect(socket->value, reinterpret_cast<sockaddr*>(&native), size) ? Fail(NativeError()) : 0;
+    return ::connect(socket->value, reinterpret_cast<sockaddr*>(&native), size) ? Fail(ConnectError()) : 0;
 }
 int APS5_VABI listen_nid_postfix(int descriptor, int backlog) {
     const auto socket = Lookup(descriptor);
