@@ -29,6 +29,33 @@
 
 extern "C" int* APS5_VABI __error_nid_postfix();
 
+static int InvalidClockId() {
+    *__error_nid_postfix() = 22;
+    return -1;
+}
+
+static bool IsKnownClockId(int clockId) {
+    switch (clockId) {
+        case 0:
+        case 1:
+        case 2:
+        case 4:
+        case 5:
+        case 7:
+        case 8:
+        case 9:
+        case 10:
+        case 11:
+        case 12:
+        case 13:
+        case 14:
+        case 15:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static std::uint64_t RawMonotonicNanos() {
 #ifdef _WIN32
     return TimedWait::NowNanos();
@@ -375,6 +402,7 @@ int APS5_VABI clock_gettime_nid_postfix(int clockId, KernelTimespec* tp) {
         tp->tv_nsec = static_cast<std::int64_t>(nanos % 1000000000ULL);
         return 0;
     }
+    if (clockId >= 0) return InvalidClockId();
     throw std::runtime_error(std::string(__func__) + ": unsupported clock_id " + std::to_string(clockId));
 #else
     clockid_t nativeId;
@@ -408,6 +436,7 @@ int APS5_VABI clock_gettime_nid_postfix(int clockId, KernelTimespec* tp) {
             nativeId = CLOCK_PROCESS_CPUTIME_ID;
             break;
         default:
+            if (clockId >= 0) return InvalidClockId();
             throw std::runtime_error(std::string(__func__) + ": unsupported clock_id " + std::to_string(clockId));
     }
     struct timespec ts{};
@@ -484,6 +513,7 @@ int APS5_VABI clock_getres_nid_postfix(int clockId, KernelTimespec* res) {
         res->tv_nsec = static_cast<std::int64_t>(nanos % 1000000000ULL);
         return 0;
     }
+    if (clockId >= 0) return InvalidClockId();
     throw std::runtime_error(std::string(__func__) + ": unsupported clock_id " + std::to_string(clockId));
 #else
     clockid_t nativeId;
@@ -516,6 +546,7 @@ int APS5_VABI clock_getres_nid_postfix(int clockId, KernelTimespec* res) {
             nativeId = CLOCK_PROCESS_CPUTIME_ID;
             break;
         default:
+            if (clockId >= 0) return InvalidClockId();
             throw std::runtime_error(std::string(__func__) + ": unsupported clock_id " + std::to_string(clockId));
     }
     struct timespec ts{};
@@ -538,12 +569,16 @@ static constexpr int SceKernelErrorEfault = static_cast<int>(0x8002000e);
 
 int APS5_VABI sceKernelClockGetres(KernelClockid clock_id, KernelTimespec* tp) {
     if (tp == nullptr) return SceKernelErrorEfault;
-    return clock_getres_nid_postfix(static_cast<int>(clock_id), tp);
+    const int id = static_cast<int>(clock_id);
+    if (id >= 0 && !IsKnownClockId(id)) return SceKernelError(22);
+    return clock_getres_nid_postfix(id, tp);
 }
 
 int APS5_VABI sceKernelClockGettime(KernelClockid clock_id, KernelTimespec* tp) {
     if (tp == nullptr) return SceKernelErrorEfault;
-    return clock_gettime_nid_postfix(static_cast<int>(clock_id), tp);
+    const int id = static_cast<int>(clock_id);
+    if (id >= 0 && !IsKnownClockId(id)) return SceKernelError(22);
+    return clock_gettime_nid_postfix(id, tp);
 }
 
 int APS5_VABI sceKernelConvertLocaltimeToUtc(int64_t local_time, int64_t reserved, int64_t* utc_time, KernelTimezone* timezone, int32_t* dst_seconds) {
