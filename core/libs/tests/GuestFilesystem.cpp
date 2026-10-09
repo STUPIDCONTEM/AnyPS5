@@ -6,10 +6,16 @@
 #include <fstream>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 #ifdef _WIN32
 #include <io.h>
 #else
 #include <unistd.h>
+#ifdef __linux__
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#endif
 #endif
 extern "C" {
 int APS5_VABI remove_nid_postfix(const char*);
@@ -34,6 +40,7 @@ int APS5_VABI mkdir_nid_postfix(const char*, unsigned short);
 int APS5_VABI sceKernelOpen(const char*, int, unsigned short);
 int APS5_VABI sceKernelClose(int);
 int APS5_VABI sceKernelStat(const char*, FileStat*);
+int APS5_VABI sceKernelFstat(int, FileStat*);
 int APS5_VABI sceKernelUnlink(const char*);
 int APS5_VABI sceKernelRmdir(const char*);
 int* APS5_VABI __error_nid_postfix();
@@ -170,6 +177,55 @@ int main() {
     { std::ofstream stream(present); stream << "posix"; }
     FileStat status{};
     Require(stat_nid_postfix(presentName.c_str(), &status) == 0 && status.st_size == 5);
+#ifdef __linux__
+    errno = E2BIG;
+    Require(stat_nid_postfix(presentName.c_str(), &status) == 0);
+    Require(errno == E2BIG);
+    errno = 0;
+    struct statx before{};
+    if (::statx(AT_FDCWD, presentName.c_str(), AT_STATX_SYNC_AS_STAT, STATX_BTIME, &before) == 0 &&
+        (before.stx_mask & STATX_BTIME) != 0) {
+        const int birthDescriptor = open_nid_postfix(presentName.c_str(), 0, 0);
+        Require(birthDescriptor >= 0);
+        FileStat descriptorBefore{};
+        errno = E2BIG;
+        Require(sceKernelFstat(birthDescriptor, &descriptorBefore) == 0);
+        Require(errno == E2BIG);
+        errno = 0;
+        Require(status.st_birthtim.tv_sec == static_cast<std::int64_t>(before.stx_btime.tv_sec) &&
+                status.st_birthtim.tv_nsec == static_cast<std::int64_t>(before.stx_btime.tv_nsec));
+        Require(descriptorBefore.st_birthtim.tv_sec == static_cast<std::int64_t>(before.stx_btime.tv_sec) &&
+                descriptorBefore.st_birthtim.tv_nsec == static_cast<std::int64_t>(before.stx_btime.tv_nsec));
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const KernelTimeval oldTimes[2]{{1000000000, 0}, {1000000000, 0}};
+        Require(utimes_nid_postfix(presentName.c_str(), oldTimes) == 0);
+        FileStat updated{};
+        FileStat descriptorUpdated{};
+        struct statx after{};
+        Require(stat_nid_postfix(presentName.c_str(), &updated) == 0);
+        Require(sceKernelFstat(birthDescriptor, &descriptorUpdated) == 0);
+        Require(::statx(AT_FDCWD, presentName.c_str(), AT_STATX_SYNC_AS_STAT, STATX_BTIME, &after) == 0 &&
+                (after.stx_mask & STATX_BTIME) != 0);
+        Require(after.stx_btime.tv_sec == before.stx_btime.tv_sec && after.stx_btime.tv_nsec == before.stx_btime.tv_nsec);
+        Require(updated.st_birthtim.tv_sec == static_cast<std::int64_t>(after.stx_btime.tv_sec) &&
+                updated.st_birthtim.tv_nsec == static_cast<std::int64_t>(after.stx_btime.tv_nsec));
+        Require(descriptorUpdated.st_birthtim.tv_sec == static_cast<std::int64_t>(after.stx_btime.tv_sec) &&
+                descriptorUpdated.st_birthtim.tv_nsec == static_cast<std::int64_t>(after.stx_btime.tv_nsec));
+        Require(updated.st_ctim.tv_sec != updated.st_birthtim.tv_sec || updated.st_ctim.tv_nsec != updated.st_birthtim.tv_nsec);
+        Require(close_nid_postfix(birthDescriptor) == 0);
+    } else {
+        Require(status.st_birthtim.tv_sec == -1 && status.st_birthtim.tv_nsec == 0);
+        const int birthDescriptor = open_nid_postfix(presentName.c_str(), 0, 0);
+        Require(birthDescriptor >= 0);
+        FileStat descriptorStatus{};
+        errno = E2BIG;
+        Require(sceKernelFstat(birthDescriptor, &descriptorStatus) == 0);
+        Require(errno == E2BIG);
+        errno = 0;
+        Require(descriptorStatus.st_birthtim.tv_sec == -1 && descriptorStatus.st_birthtim.tv_nsec == 0);
+        Require(close_nid_postfix(birthDescriptor) == 0);
+    }
+#endif
     Require(stat_nid_postfix(missingName.c_str(), &status) == -1 && *__error_nid_postfix() == 2);
     Require(sceKernelStat(missingName.c_str(), &status) == static_cast<int>(0x80020002u));
     Require(stat_nid_postfix("", &status) == -1 && *__error_nid_postfix() == 2);

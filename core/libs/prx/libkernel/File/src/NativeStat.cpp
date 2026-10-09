@@ -3,6 +3,9 @@
 
 #include <stdexcept>
 #include <string>
+#if defined(__linux__)
+#include <cerrno>
+#endif
 
 #ifdef _WIN32
 #include <sys/stat.h>
@@ -16,6 +19,9 @@ static int DoFstat(int fd, NativeStat* st) {
     return _fstat64(fd, st);
 }
 #else
+#if defined(__linux__)
+#include <fcntl.h>
+#endif
 #include <sys/stat.h>
 using NativeStat = struct stat;
 static int DoStat(const std::filesystem::path& p, NativeStat* st) {
@@ -26,7 +32,35 @@ static int DoFstat(int fd, NativeStat* st) {
 }
 #endif
 
-static void CopyNativeStat(const NativeStat& st, FileStat* sb) {
+#if defined(__linux__)
+static bool BirthTime(const std::filesystem::path& path, KernelTimespec* birthTime) {
+    const int savedErrno = errno;
+    struct statx info{};
+    const bool available = ::statx(AT_FDCWD, path.c_str(), AT_STATX_SYNC_AS_STAT, STATX_BTIME, &info) == 0 &&
+                           (info.stx_mask & STATX_BTIME) != 0;
+    if (available) {
+        birthTime->tv_sec = static_cast<std::int64_t>(info.stx_btime.tv_sec);
+        birthTime->tv_nsec = static_cast<std::int64_t>(info.stx_btime.tv_nsec);
+    }
+    errno = savedErrno;
+    return available;
+}
+
+static bool BirthTime(int descriptor, KernelTimespec* birthTime) {
+    const int savedErrno = errno;
+    struct statx info{};
+    const bool available = ::statx(descriptor, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT, STATX_BTIME, &info) == 0 &&
+                           (info.stx_mask & STATX_BTIME) != 0;
+    if (available) {
+        birthTime->tv_sec = static_cast<std::int64_t>(info.stx_btime.tv_sec);
+        birthTime->tv_nsec = static_cast<std::int64_t>(info.stx_btime.tv_nsec);
+    }
+    errno = savedErrno;
+    return available;
+}
+#endif
+
+static void CopyNativeStat(const NativeStat& st, FileStat* sb, const KernelTimespec* birthTime = nullptr) {
     *sb = FileStat{};
     sb->st_mode = static_cast<std::uint16_t>(st.st_mode);
     sb->st_size = static_cast<std::int64_t>(st.st_size);
@@ -66,7 +100,12 @@ static void CopyNativeStat(const NativeStat& st, FileStat* sb) {
     sb->st_birthtim.tv_sec = static_cast<std::int64_t>(st.st_birthtimespec.tv_sec);
     sb->st_birthtim.tv_nsec = static_cast<std::int64_t>(st.st_birthtimespec.tv_nsec);
 #elif defined(__linux__)
-    sb->st_birthtim = sb->st_ctim;
+    if (birthTime) {
+        sb->st_birthtim = *birthTime;
+    } else {
+        sb->st_birthtim.tv_sec = -1;
+        sb->st_birthtim.tv_nsec = 0;
+    }
 #else
     sb->st_birthtim.tv_sec = static_cast<std::int64_t>(st.st_birthtim.tv_sec);
     sb->st_birthtim.tv_nsec = static_cast<std::int64_t>(st.st_birthtim.tv_nsec);
@@ -81,7 +120,12 @@ void FillFileStat(const std::filesystem::path& nativePath, FileStat* sb) {
     if (DoStat(nativePath, &st) != 0) {
         throw std::runtime_error(std::string("FillFileStat: stat failed for ") + nativePath.string());
     }
+#if defined(__linux__)
+    KernelTimespec birthTime{};
+    CopyNativeStat(st, sb, BirthTime(nativePath, &birthTime) ? &birthTime : nullptr);
+#else
     CopyNativeStat(st, sb);
+#endif
 }
 
 void FillFileStat(int nativeDescriptor, FileStat* sb) {
@@ -89,13 +133,23 @@ void FillFileStat(int nativeDescriptor, FileStat* sb) {
     if (DoFstat(nativeDescriptor, &st) != 0) {
         throw std::runtime_error(std::string("FillFileStat: fstat failed for fd ") + std::to_string(nativeDescriptor));
     }
+#if defined(__linux__)
+    KernelTimespec birthTime{};
+    CopyNativeStat(st, sb, BirthTime(nativeDescriptor, &birthTime) ? &birthTime : nullptr);
+#else
     CopyNativeStat(st, sb);
+#endif
 }
 
 bool FillFileStatFromDescriptor(int fd, FileStat* sb) {
     NativeStat st{};
     if (DoFstat(fd, &st) != 0) return false;
+#if defined(__linux__)
+    KernelTimespec birthTime{};
+    CopyNativeStat(st, sb, BirthTime(fd, &birthTime) ? &birthTime : nullptr);
+#else
     CopyNativeStat(st, sb);
+#endif
     return true;
 }
 
