@@ -29,6 +29,8 @@ int main() {
     Require(bind_nid_postfix(listener, address.data(), address.size()) == 0);
     Require(bind_nid_postfix(listener, address.data(), address.size()) == -1 && *__error_nid_postfix() == 22);
     Require(listen_nid_postfix(listener, 4) == 0);
+    std::array<std::uint8_t, 16> invalid_peer{};
+    Require(accept_nid_postfix(listener, invalid_peer.data(), nullptr) == -1 && *__error_nid_postfix() == 22);
     std::uint32_t address_size = address.size();
     Require(getsockname_nid_postfix(listener, address.data(), &address_size) == 0);
     Require(address_size == 16 && (address[2] != 0 || address[3] != 0));
