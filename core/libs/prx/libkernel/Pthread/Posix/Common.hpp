@@ -2,7 +2,6 @@
 #define CORE_LIBS_PRX_LIBKERNEL_PTHREAD_POSIX_COMMON_HPP
 
 #include <cstdint>
-#include <chrono>
 #include <limits>
 #include "SceTypes.hpp"
 
@@ -22,10 +21,31 @@ inline bool RelativeMicroseconds(int clockId, const KernelTimespec* abstime, Ker
     if (!abstime || abstime->tv_nsec < 0 || abstime->tv_nsec >= 1000000000) return false;
     KernelTimespec now{};
     clock_gettime_nid_postfix(clockId, &now);
-    const auto deadline = std::chrono::seconds(abstime->tv_sec) + std::chrono::nanoseconds(abstime->tv_nsec);
-    const auto current = std::chrono::seconds(now.tv_sec) + std::chrono::nanoseconds(now.tv_nsec);
-    const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline - current).count();
-    *usec = remaining <= 0 ? 0 : remaining >= std::numeric_limits<KernelUseconds>::max() ? std::numeric_limits<KernelUseconds>::max() : static_cast<KernelUseconds>(remaining);
+    if (abstime->tv_sec < now.tv_sec ||
+        (abstime->tv_sec == now.tv_sec && abstime->tv_nsec <= now.tv_nsec)) {
+        *usec = 0;
+        return true;
+    }
+
+    std::uint64_t seconds = static_cast<std::uint64_t>(abstime->tv_sec) - static_cast<std::uint64_t>(now.tv_sec);
+    std::uint64_t nanoseconds = 0;
+    if (abstime->tv_nsec >= now.tv_nsec) {
+        nanoseconds = static_cast<std::uint64_t>(abstime->tv_nsec - now.tv_nsec);
+    } else {
+        --seconds;
+        nanoseconds = 1000000000ULL - static_cast<std::uint64_t>(now.tv_nsec - abstime->tv_nsec);
+    }
+
+    constexpr std::uint64_t microsecondsPerSecond = 1000000ULL;
+    constexpr std::uint64_t maxMicroseconds = std::numeric_limits<KernelUseconds>::max();
+    constexpr std::uint64_t maxWholeSeconds = maxMicroseconds / microsecondsPerSecond;
+    if (seconds > maxWholeSeconds) {
+        *usec = static_cast<KernelUseconds>(maxMicroseconds);
+        return true;
+    }
+
+    const std::uint64_t remaining = seconds * microsecondsPerSecond + nanoseconds / 1000ULL;
+    *usec = static_cast<KernelUseconds>(remaining > maxMicroseconds ? maxMicroseconds : remaining);
     return true;
 }
 

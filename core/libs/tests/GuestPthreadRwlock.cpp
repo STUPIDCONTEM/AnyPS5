@@ -2,6 +2,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <thread>
@@ -9,7 +10,13 @@
 extern "C" {
 int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg, const char* name);
 int APS5_VABI scePthreadJoin(Pthread thread, void** retval);
+int APS5_VABI scePthreadMutexInit(PthreadMutex* mutex, const PthreadMutexattr* attr, const char* name);
+int APS5_VABI scePthreadMutexDestroy(PthreadMutex* mutex);
+int APS5_VABI scePthreadMutexLock(PthreadMutex* mutex);
+int APS5_VABI scePthreadMutexUnlock(PthreadMutex* mutex);
 int APS5_VABI clock_gettime_nid_postfix(int clockId, KernelTimespec* tp);
+int APS5_VABI pthread_mutex_timedlock_nid_postfix(PthreadMutex* mutex, const KernelTimespec* abstime);
+int APS5_VABI pthread_mutex_unlock_nid_postfix(PthreadMutex* mutex);
 int APS5_VABI pthread_rwlock_destroy_nid_postfix(PthreadRwlock* rwlock);
 int APS5_VABI pthread_rwlock_rdlock_nid_postfix(PthreadRwlock* rwlock);
 int APS5_VABI pthread_rwlock_wrlock_nid_postfix(PthreadRwlock* rwlock);
@@ -47,6 +54,22 @@ struct Holder {
     Pthread thread = nullptr;
 };
 
+struct MutexHolder {
+    PthreadMutex* mutex;
+    std::atomic<bool> held{false};
+    std::atomic<bool> release{false};
+    Pthread thread = nullptr;
+};
+
+static void* APS5_VABI HoldMutex(void* arg) {
+    auto& holder = *static_cast<MutexHolder*>(arg);
+    Require(scePthreadMutexLock(holder.mutex) == SCE_OK);
+    holder.held.store(true);
+    while (!holder.release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Require(scePthreadMutexUnlock(holder.mutex) == SCE_OK);
+    return nullptr;
+}
+
 static void* APS5_VABI Hold(void* arg) {
     auto& holder = *static_cast<Holder*>(arg);
     Require((holder.write ? pthread_rwlock_wrlock_nid_postfix(holder.rwlock) : pthread_rwlock_rdlock_nid_postfix(holder.rwlock)) == 0);
@@ -69,6 +92,8 @@ static void ExpectTimeout(TimedLock lock, PthreadRwlock* rwlock) {
     Require(std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(15));
     const KernelTimespec past = After(-1000);
     Require(lock(rwlock, &past) == GUEST_ETIMEDOUT);
+    const KernelTimespec subsecond = After(1);
+    Require(lock(rwlock, &subsecond) == GUEST_ETIMEDOUT);
     const KernelTimespec invalid{deadline.tv_sec, NANOS_PER_SECOND};
     Require(lock(rwlock, &invalid) == GUEST_EINVAL);
     const KernelTimespec negative{deadline.tv_sec, -1};
@@ -122,6 +147,55 @@ int main() {
     Require(pthread_rwlock_timedrdlock_nid_postfix(&rwlock, &deadline) == 0);
     Require(scePthreadJoin(writer.thread, nullptr) == SCE_OK);
     Require(pthread_rwlock_unlock_nid_postfix(&rwlock) == 0);
+
+    Holder farFutureWriter{&rwlock, true};
+    Start(farFutureWriter);
+    std::thread releaseFarFutureWriter([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        farFutureWriter.release.store(true);
+    });
+    const KernelTimespec farFuture{INT64_MAX, 0};
+    const int farFutureResult = pthread_rwlock_timedrdlock_nid_postfix(&rwlock, &farFuture);
+    const int farFutureUnlockResult = farFutureResult == 0 ? pthread_rwlock_unlock_nid_postfix(&rwlock) : 0;
+    releaseFarFutureWriter.join();
+    Require(scePthreadJoin(farFutureWriter.thread, nullptr) == SCE_OK);
+    if (farFutureResult != 0) {
+        std::fprintf(stderr, "far-future rwlock timed lock returned %d\n", farFutureResult);
+        std::abort();
+    }
+    if (farFutureUnlockResult != 0) {
+        std::fprintf(stderr, "far-future rwlock unlock returned %d\n", farFutureUnlockResult);
+        std::abort();
+    }
+
+    PthreadMutex mutex = nullptr;
+    Require(scePthreadMutexInit(&mutex, nullptr, nullptr) == SCE_OK);
+    MutexHolder farFutureMutex{&mutex};
+    Require(scePthreadCreate(&farFutureMutex.thread, nullptr, HoldMutex, &farFutureMutex, nullptr) == SCE_OK);
+    while (!farFutureMutex.held.load()) std::this_thread::yield();
+    const auto mutexWaitStart = std::chrono::steady_clock::now();
+    std::thread releaseFarFutureMutex([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        farFutureMutex.release.store(true);
+    });
+    const int farFutureMutexResult = pthread_mutex_timedlock_nid_postfix(&mutex, &farFuture);
+    const auto mutexWaitElapsed = std::chrono::steady_clock::now() - mutexWaitStart;
+    const int farFutureMutexUnlockResult = farFutureMutexResult == 0 ? pthread_mutex_unlock_nid_postfix(&mutex) : 0;
+    releaseFarFutureMutex.join();
+    Require(scePthreadJoin(farFutureMutex.thread, nullptr) == SCE_OK);
+    Require(scePthreadMutexDestroy(&mutex) == SCE_OK);
+    if (farFutureMutexResult != 0) {
+        std::fprintf(stderr, "far-future mutex timed lock returned %d\n", farFutureMutexResult);
+        std::abort();
+    }
+    if (farFutureMutexUnlockResult != 0) {
+        std::fprintf(stderr, "far-future mutex unlock returned %d\n", farFutureMutexUnlockResult);
+        std::abort();
+    }
+    if (mutexWaitElapsed < std::chrono::milliseconds(15)) {
+        std::fprintf(stderr, "far-future mutex timed lock returned too early\n");
+        std::abort();
+    }
 
     bool rejected = false;
     try { pthread_rwlock_timedrdlock_nid_postfix(&rwlock, nullptr); }
