@@ -169,6 +169,11 @@ int APS5_VABI sigprocmask_nid_postfix(int how, const void* set, void* previousSe
                                     static_cast<GuestSignalSet*>(previousSet));
 }
 
+int APS5_VABI pthread_sigmask_nid_postfix(int how, const GuestSignalSet* set, GuestSignalSet* previousSet) {
+    if (set != nullptr && (how < 1 || how > 3)) return 22;
+    return _sigprocmask_nid_postfix(how, set, previousSet);
+}
+
 void APS5_VABI SignalJumpSaveMask_nid_no_patch(GuestSignalSet* saved) {
     _sigprocmask_nid_postfix(1, nullptr, saved);
 }
