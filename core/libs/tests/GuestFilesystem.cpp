@@ -25,6 +25,7 @@ int APS5_VABI sceKernelChmod_nid_postfix(const char*, unsigned short);
 int APS5_VABI sceKernelFchmod(int, unsigned short);
 int APS5_VABI fchmod_nid_postfix(int, int);
 int APS5_VABI futimes_nid_postfix(int, const KernelTimeval*);
+int APS5_VABI utimes_nid_postfix(const char*, const KernelTimeval*);
 int APS5_VABI socket_nid_postfix(int, int, int);
 int APS5_VABI sceKernelFsync(int);
 int APS5_VABI sceKernelWriteThrottlingStatus(std::uint64_t*);
@@ -58,6 +59,14 @@ static void Check(bool value, int line) {
     }
 }
 #define Require(value) Check((value), __LINE__)
+#ifdef __linux__
+static void RequireBirthTime(bool value, const char* description) {
+    if (!value) {
+        std::fprintf(stderr, "Linux birthtime regression: %s\n", description);
+        std::abort();
+    }
+}
+#endif
 int main() {
     Require(sceKernelDebugOutText(-1, "text") == static_cast<int>(0x80020016u));
     std::uint64_t throttling[4] = {1, 2, 3, 4};
@@ -180,6 +189,9 @@ int main() {
     FileStat status{};
     Require(stat_nid_postfix(presentName.c_str(), &status) == 0 && status.st_size == 5);
 #ifdef __linux__
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    const KernelTimeval seededTimes[2]{{1000000000, 0}, {1000000000, 0}};
+    Require(utimes_nid_postfix(presentName.c_str(), seededTimes) == 0);
     errno = E2BIG;
     Require(stat_nid_postfix(presentName.c_str(), &status) == 0);
     Require(errno == E2BIG);
@@ -195,10 +207,12 @@ int main() {
         Require(sceKernelFstat(birthDescriptor, &descriptorBefore) == 0);
         Require(errno == E2BIG);
         errno = 0;
-        Require(status.st_birthtim.tv_sec == static_cast<std::int64_t>(before.stx_btime.tv_sec) &&
-                status.st_birthtim.tv_nsec == static_cast<std::int64_t>(before.stx_btime.tv_nsec));
-        Require(descriptorBefore.st_birthtim.tv_sec == static_cast<std::int64_t>(before.stx_btime.tv_sec) &&
-                descriptorBefore.st_birthtim.tv_nsec == static_cast<std::int64_t>(before.stx_btime.tv_nsec));
+        RequireBirthTime(status.st_birthtim.tv_sec == static_cast<std::int64_t>(before.stx_btime.tv_sec) &&
+                         status.st_birthtim.tv_nsec == static_cast<std::int64_t>(before.stx_btime.tv_nsec),
+                         "path stat did not match native STATX_BTIME");
+        RequireBirthTime(descriptorBefore.st_birthtim.tv_sec == static_cast<std::int64_t>(before.stx_btime.tv_sec) &&
+                         descriptorBefore.st_birthtim.tv_nsec == static_cast<std::int64_t>(before.stx_btime.tv_nsec),
+                         "descriptor stat did not match native STATX_BTIME");
         std::this_thread::sleep_for(std::chrono::seconds(1));
         const KernelTimeval oldTimes[2]{{1000000000, 0}, {1000000000, 0}};
         Require(utimes_nid_postfix(presentName.c_str(), oldTimes) == 0);
@@ -257,6 +271,11 @@ int main() {
 #ifndef _WIN32
     const auto link = root / "link";
     std::filesystem::create_symlink("present.txt", link);
+#if defined(__linux__) && defined(AT_SYMLINK_NOFOLLOW)
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    const struct timespec oldLinkTimes[2]{{1000000000, 0}, {1000000000, 0}};
+    Require(::utimensat(AT_FDCWD, link.string().c_str(), oldLinkTimes, AT_SYMLINK_NOFOLLOW) == 0);
+#endif
     Require(lstat_nid_postfix(link.string().c_str(), &linkStatus) == 0);
     Require((linkStatus.st_mode & 0170000) == 0120000 && linkStatus.st_size == 11);
 #if defined(__linux__) && defined(SYS_statx) && defined(STATX_BTIME) && defined(AT_STATX_SYNC_AS_STAT) && defined(AT_SYMLINK_NOFOLLOW)
@@ -264,8 +283,9 @@ int main() {
     const auto linkName = link.string();
     if (::syscall(SYS_statx, AT_FDCWD, linkName.c_str(), AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT, STATX_BTIME, &linkBirth) == 0 &&
         (linkBirth.stx_mask & STATX_BTIME) != 0) {
-        Require(linkStatus.st_birthtim.tv_sec == static_cast<std::int64_t>(linkBirth.stx_btime.tv_sec) &&
-                linkStatus.st_birthtim.tv_nsec == static_cast<std::int64_t>(linkBirth.stx_btime.tv_nsec));
+        RequireBirthTime(linkStatus.st_birthtim.tv_sec == static_cast<std::int64_t>(linkBirth.stx_btime.tv_sec) &&
+                         linkStatus.st_birthtim.tv_nsec == static_cast<std::int64_t>(linkBirth.stx_btime.tv_nsec),
+                         "symlink lstat did not match native STATX_BTIME");
     }
 #endif
     Require(stat_nid_postfix(link.string().c_str(), &status) == 0 && (status.st_mode & 0170000) == 0100000);
