@@ -30,6 +30,7 @@ static constexpr int KERNEL_IOV_MAX = 1024;
 
 #ifdef _WIN32
 #include <windows.h>
+#include <winternl.h>
 #include <io.h>
 #include <fcntl.h>
 #include <direct.h>
@@ -71,6 +72,17 @@ static int NativeFchmod(int descriptor, int mode) {
     return path ? NativeChmod(*path, mode) : -1;
 }
 static int NativeFtruncate(int descriptor, std::int64_t length) {
+    const auto handle = reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor));
+    if (handle == INVALID_HANDLE_VALUE) return EBADF;
+    if (::GetFileType(handle) != FILE_TYPE_DISK) return EINVAL;
+    using QueryObject = NTSTATUS (NTAPI*)(HANDLE, OBJECT_INFORMATION_CLASS, PVOID, ULONG, PULONG);
+    static const auto queryObject = reinterpret_cast<QueryObject>(reinterpret_cast<void*>(
+        ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "NtQueryObject")));
+    PUBLIC_OBJECT_BASIC_INFORMATION information{};
+    if (!queryObject || queryObject(handle, ObjectBasicInformation, &information, sizeof(information), nullptr) < 0) {
+        throw std::runtime_error("NativeFtruncate: cannot query file access");
+    }
+    if ((information.GrantedAccess & FILE_WRITE_DATA) == 0) return EINVAL;
     return static_cast<int>(::_chsize_s(descriptor, length));
 }
 static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* times) {
@@ -165,7 +177,7 @@ static int NativeFchmod(int descriptor, int mode) {
     return ::fchmod(descriptor, static_cast<mode_t>(mode));
 }
 static int NativeFtruncate(int descriptor, std::int64_t length) {
-    return ::ftruncate(descriptor, static_cast<off_t>(length));
+    return ::ftruncate(descriptor, static_cast<off_t>(length)) == 0 ? 0 : errno;
 }
 static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* times) {
     if (times == nullptr) return ::utimes(path.c_str(), nullptr);
@@ -287,25 +299,17 @@ int64_t APS5_VABI fstat_nid_disambig1_nid_postfix(int d, FileStat* sb) {
     return 0;
 }
 
-int APS5_VABI ftruncate_nid_postfix(int d, int64_t length) {
-    if (length < 0) {
-        APS5_INVALID_ARG_EX;
-    }
-#ifdef _WIN32
-    int error = NativeFtruncate(d, length);
-    if (error != 0) {
-        throw std::runtime_error(std::string(__func__) + ": ftruncate failed, fd=" + std::to_string(d) + ", error=" + std::to_string(error));
-    }
-#else
-    if (NativeFtruncate(d, length) != 0) {
-        throw std::runtime_error(std::string(__func__) + ": ftruncate failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
-    }
-#endif
-    return 0;
+int APS5_VABI sceKernelFtruncate(int d, int64_t length) {
+    if (length < 0) return SCE_KERNEL_ERROR_EINVAL;
+    if (d >= GuestSockets::FirstDescriptor) return SceErrorFromErrno(GuestSockets::IsOpen(d) ? GUEST_EINVAL : GUEST_EBADF);
+    const int previousErrno = errno;
+    const int error = NativeFtruncate(d, length);
+    errno = previousErrno;
+    return error == 0 ? 0 : SceErrorFromErrno(error);
 }
 
-int APS5_VABI sceKernelFtruncate(int d, int64_t length) {
-    return ftruncate_nid_postfix(d, length);
+int APS5_VABI ftruncate_nid_postfix(int d, int64_t length) {
+    return PosixResult(sceKernelFtruncate(d, length));
 }
 
 int64_t APS5_VABI lseek_nid_postfix(int d, int64_t offset, int whence) {
