@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstdio>
 #include <stdexcept>
 #include <thread>
 
@@ -13,6 +14,7 @@ int APS5_VABI sceKernelAddUserEvent(KernelEqueue eq, int id);
 int APS5_VABI sceKernelTriggerUserEvent(KernelEqueue eq, int id, void* udata);
 int APS5_VABI sceKernelDeleteUserEvent(KernelEqueue eq, int id);
 int APS5_VABI sceKernelAddHRTimerEvent(KernelEqueue eq, int id, const KernelTimespec* ts, void* udata);
+int APS5_VABI sceKernelDeleteHRTimerEvent(KernelEqueue eq, int id);
 int APS5_VABI sceKernelAddTimerEvent(KernelEqueue eq, int id, KernelUseconds usec, void* udata);
 int APS5_VABI sceKernelDeleteTimerEvent(KernelEqueue eq, int id);
 intptr_t APS5_VABI sceKernelGetEventData(const KernelEvent* ev);
@@ -30,7 +32,12 @@ static constexpr int EVFILT_TIMER = -7;
 static constexpr int EVFILT_USER = -11;
 static constexpr int EVFILT_HRTIMER = -15;
 
-static void Require(bool value) { if (!value) std::abort(); }
+static void Require(bool value, const char* message = nullptr) {
+    if (!value) {
+        if (message) std::fprintf(stderr, "Equeue: %s\n", message);
+        std::abort();
+    }
+}
 
 template <typename TResult>
 static bool RejectsNull(TResult (APS5_VABI *accessor)(const KernelEvent*)) {
@@ -124,8 +131,45 @@ static void VerifyPeriodicTimer() {
     Require(sceKernelDeleteEqueue(eq) == SCE_OK);
 }
 
+static void VerifyHighResolutionTimerOverflow() {
+    KernelEqueue eq = 0;
+    Require(sceKernelCreateEqueue(&eq, "hrtimer-overflow") == SCE_OK);
+
+    const KernelTimespec multiplyOverflow{1LL << 55, 0};
+    Require(sceKernelAddHRTimerEvent(eq, 20, &multiplyOverflow, nullptr) == SCE_OK);
+
+    const KernelTimespec additionOverflow{18446744073LL, 709551616LL};
+    Require(sceKernelAddHRTimerEvent(eq, 21, &additionOverflow, nullptr) == SCE_OK);
+
+    KernelEvent event{};
+    int count = 0;
+    const KernelUseconds poll = 0;
+    Require(sceKernelWaitEqueue(eq, &event, 1, &count, &poll) == SCE_KERNEL_ERROR_ETIMEDOUT,
+        "overflowing durations must not fire immediately");
+    const KernelUseconds shortWait = 5000;
+    Require(sceKernelWaitEqueue(eq, &event, 1, &count, &shortWait) == SCE_KERNEL_ERROR_ETIMEDOUT,
+        "saturated timers must preserve finite wait timeouts");
+    const KernelTimespec soon{0, 1000000};
+    Require(sceKernelAddHRTimerEvent(eq, 23, &soon, nullptr) == SCE_OK);
+    const KernelUseconds wait = 1000000;
+    Require(sceKernelWaitEqueue(eq, &event, 1, &count, &wait) == SCE_OK,
+        "saturated timers must not block an ordinary timer");
+    Require(count == 1 && sceKernelGetEventId(&event) == 23);
+
+    Require(sceKernelDeleteHRTimerEvent(eq, 20) == SCE_OK);
+    Require(sceKernelDeleteHRTimerEvent(eq, 21) == SCE_OK);
+    Require(sceKernelDeleteHRTimerEvent(eq, 20) == SCE_KERNEL_ERROR_ENOENT);
+
+    const KernelTimespec cancelled{1, 0};
+    Require(sceKernelAddHRTimerEvent(eq, 22, &cancelled, nullptr) == SCE_OK);
+    Require(sceKernelDeleteHRTimerEvent(eq, 22) == SCE_OK);
+    Require(sceKernelWaitEqueue(eq, &event, 1, &count, &poll) == SCE_KERNEL_ERROR_ETIMEDOUT);
+    Require(sceKernelDeleteEqueue(eq) == SCE_OK);
+}
+
 int main() {
     VerifyPeriodicTimer();
+    VerifyHighResolutionTimerOverflow();
 
     KernelEqueue eq = 0;
     Require(sceKernelCreateEqueue(&eq, "events") == SCE_OK);

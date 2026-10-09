@@ -397,16 +397,19 @@ int APS5_VABI sceKernelAddHRTimerEvent(KernelEqueue eq, int id, const KernelTime
     if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000LL) {
         return SCE_KERNEL_ERROR_EINVAL;
     }
-    const uint64_t delayNs =
-        static_cast<uint64_t>(ts->tv_sec) * 1000000000ULL +
-        static_cast<uint64_t>(ts->tv_nsec);
+    constexpr uint64_t nanosPerSecond = 1000000000ULL;
+    const uint64_t maxNanos = std::numeric_limits<uint64_t>::max();
+    const uint64_t seconds = static_cast<uint64_t>(ts->tv_sec);
+    const uint64_t nanoseconds = static_cast<uint64_t>(ts->tv_nsec);
+    const uint64_t delayNs = seconds <= (maxNanos - nanoseconds) / nanosPerSecond
+        ? seconds * nanosPerSecond + nanoseconds : maxNanos;
     const uint64_t nowNs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()
         ).count()
     );
     KernelEqueueEvent event{};
-    event.deadlineNs = (delayNs <= std::numeric_limits<uint64_t>::max() - nowNs)
+    event.deadlineNs = (delayNs <= maxNanos - nowNs)
         ? nowNs + delayNs : std::numeric_limits<uint64_t>::max();
     event.event.ident = static_cast<uintptr_t>(id);
     event.event.filter = EVFILT_HRTIMER;
