@@ -1,7 +1,14 @@
 #include "SceTypes.hpp"
 #include <cstring>
+#include <cerrno>
+#ifndef _WIN32
+#include <clocale>
+#include <cwchar>
+#endif
+#include "prx/libc/include/ApplicationHeap.hpp"
 #include <stdexcept>
 #include <cstdio>
+#include <string>
 
 extern "C" {
 int APS5_VABI snprintf_nid_postfix(char*, size_t, const char*, ...);
@@ -11,6 +18,7 @@ int APS5_VABI libc_printf_nid_postfix(const char*, ...);
 int APS5_VABI sscanf_nid_postfix(const char*, const char*, ...);
 int APS5_VABI vsnprintf_nid_postfix(char*, size_t, const char*, VaList*);
 int APS5_VABI vprintf_nid_postfix(const char*, VaList*);
+int APS5_VABI asprintf_nid_postfix(char**, const char*, ...);
 }
 
 static void Require(bool condition) {
@@ -69,6 +77,31 @@ static bool CheckWidePrecision() {
 }
 #endif
 
+#ifndef _WIN32
+static void AsprintfTranslatesHostEilseqToGuestNumber() {
+    void* defaultAllocatorApi[10]{};
+    ApplicationHeapRegister_nid_no_patch(defaultAllocatorApi);
+
+    const char* activeLocale = std::setlocale(LC_CTYPE, nullptr);
+    const std::string savedLocale = activeLocale ? activeLocale : "C";
+    Require(std::setlocale(LC_CTYPE, "C") != nullptr);
+
+    char* output = reinterpret_cast<char*>(1);
+    errno = 71;
+    const int failedCount = asprintf_nid_postfix(&output, "%lc", static_cast<std::wint_t>(0xd800));
+    Require(failedCount == -1 && output == nullptr);
+    if (errno != 86) throw std::runtime_error("asprintf EILSEQ regression: expected guest errno 86, got " + std::to_string(errno));
+
+    output = nullptr;
+    const int count = asprintf_nid_postfix(&output, "ok:%d", 7);
+    Require(count == 4 && output != nullptr && std::strcmp(output, "ok:7") == 0);
+    ApplicationHeapFree_nid_no_patch(output);
+
+    errno = 0;
+    Require(asprintf_nid_postfix(nullptr, "%d", 1) == -1 && errno == 22);
+    Require(std::setlocale(LC_CTYPE, savedLocale.c_str()) != nullptr);
+}
+#endif
 __attribute__((noinline)) static void APS5_VABI RunChecks() {
     char buffer[1024];
     Require(FormatList(buffer, sizeof(buffer), "Mount requested: %d", 0) == 18);
@@ -129,5 +162,5 @@ __attribute__((noinline)) static void APS5_VABI RunChecks() {
 #ifdef _WIN32
 int main() { RunChecks(); return CheckWidePrecision() ? 0 : 1; }
 #else
-int main() { RunChecks(); }
+int main() { RunChecks(); AsprintfTranslatesHostEilseqToGuestNumber(); }
 #endif
