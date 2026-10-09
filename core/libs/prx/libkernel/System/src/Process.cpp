@@ -3,6 +3,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <corecrt_startup.h>
 #else
 #include <sched.h>
 #include <unistd.h>
@@ -44,13 +45,24 @@ class ProcessArguments {
 public:
     ProcessArguments() {
 #ifdef _WIN32
-        std::array<char, 32768> path{};
-        const auto size = GetModuleFileNameA(nullptr, path.data(), static_cast<DWORD>(path.size()));
-        if (size == 0)
-            throw std::system_error(GetLastError(), std::system_category(), "Reading executable path");
-        if (size >= path.size())
-            throw std::runtime_error("Executable path exceeds the guest argument buffer");
-        arguments.emplace_back(path.data(), size);
+        const int error = _configure_wide_argv(_crt_argv_unexpanded_arguments);
+        if (error != 0)
+            throw std::system_error(error, std::generic_category(), "Reading process arguments");
+        if (__argc <= 0 || __wargv == nullptr)
+            throw std::runtime_error("Invalid process argument vector");
+        arguments.reserve(static_cast<std::size_t>(__argc));
+        for (int index = 0; index < __argc; ++index) {
+            if (__wargv[index] == nullptr)
+                throw std::runtime_error("Null process argument");
+            const auto size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, __wargv[index], -1, nullptr, 0, nullptr, nullptr);
+            if (size == 0)
+                throw std::system_error(GetLastError(), std::system_category(), "Converting process argument to UTF-8");
+            std::string argument(static_cast<std::size_t>(size), '\0');
+            if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, __wargv[index], -1, argument.data(), size, nullptr, nullptr) == 0)
+                throw std::system_error(GetLastError(), std::system_category(), "Converting process argument to UTF-8");
+            argument.pop_back();
+            arguments.push_back(std::move(argument));
+        }
 #else
         std::ifstream stream("/proc/self/cmdline", std::ios::binary);
         if (!stream)

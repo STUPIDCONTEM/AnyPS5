@@ -74,6 +74,18 @@ if(BUILD_TESTING)
         set_tests_properties(param_json_parser PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    if(Python3_Interpreter_FOUND)
+        add_test_executable(guest_process_arguments_tests ${LIBS_INCLUDE_DIR}/tests/GuestProcessArguments.cpp)
+        target_include_directories(guest_process_arguments_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_process_arguments_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_process_arguments_tests)
+        add_test(NAME guest_process_arguments COMMAND ${Python3_EXECUTABLE}
+            ${LIBS_INCLUDE_DIR}/tests/test_process_arguments.py $<TARGET_FILE:guest_process_arguments_tests>)
+        if(WIN32)
+            set_tests_properties(guest_process_arguments PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        endif()
+    endif()
     add_test_executable(guest_posix_sem_tests ${LIBS_INCLUDE_DIR}/tests/GuestPosixSem.cpp)
     target_include_directories(guest_posix_sem_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_posix_sem_tests PRIVATE libkernel libc)
