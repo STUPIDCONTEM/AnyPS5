@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cmath>
 #include <cstdlib>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -86,8 +87,25 @@ double APS5_VABI modf_nid_postfix(double x, double* integral) { return std::modf
 float APS5_VABI modff_nid_postfix(float x, float* integral) { return std::modf(x, integral); }
 double APS5_VABI tanh_nid_postfix(double x) { return std::tanh(x); }
 float APS5_VABI tanhf_nid_postfix(float x) { return std::tanh(x); }
-float APS5_VABI _FSinh_nid_postfix(float x, float y) { return y * std::sinh(x); }
-float APS5_VABI _FCosh_nid_postfix(float x, float y) { return y * std::cosh(x); }
+static float ScaledHyperbolicResult_nid_no_patch(double value) {
+    const float result = static_cast<float>(value);
+    if (std::isinf(result)) errno = ERANGE;
+    return result;
+}
+
+float APS5_VABI _FSinh_nid_postfix(float x, float y) {
+    if (std::isnan(x)) return x;
+    if (std::isinf(x)) return y != 0.0F ? x : std::signbit(x) ? -y : y;
+    if (x == 0.0F) return x * y;
+    if (y == 0.0F) return x < 0.0F ? -y : y;
+    return ScaledHyperbolicResult_nid_no_patch(static_cast<double>(y) * std::sinh(static_cast<double>(x)));
+}
+
+float APS5_VABI _FCosh_nid_postfix(float x, float y) {
+    if (std::isnan(x) || std::isinf(x)) return x;
+    if (x == 0.0F || y == 0.0F) return y;
+    return ScaledHyperbolicResult_nid_no_patch(static_cast<double>(y) * std::cosh(static_cast<double>(x)));
+}
 
 struct alignas(16) LibcFloatConstant { std::uint32_t bits[4]; };
 LibcFloatConstant _FInf_nid_postfix {{0x7f800000u, 0, 0, 0}};
