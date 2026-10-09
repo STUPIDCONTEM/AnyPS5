@@ -162,7 +162,12 @@ bool FillFileStatFromDescriptor(int fd, FileStat* sb) {
 bool FillLinkStat(const std::filesystem::path& nativePath, FileStat* sb) {
     NativeStat st{};
     if (DoLstat(nativePath, &st) != 0) return false;
+#if defined(APS5_HAS_LINUX_STATX_BTIME)
+    KernelTimespec birthTime{};
+    CopyNativeStat(st, sb, BirthTime(AT_FDCWD, nativePath.c_str(), AT_SYMLINK_NOFOLLOW, st, &birthTime) ? &birthTime : nullptr);
+#else
     CopyNativeStat(st, sb);
+#endif
     return true;
 }
 
