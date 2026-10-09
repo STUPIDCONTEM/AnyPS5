@@ -252,6 +252,26 @@ static void ParseAndRoundTrip() {
         Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&root, invalid, std::strlen(invalid)) < 0);
         Require(_ZNK3sce4Json5Value7getTypeEv(&root) == TypeObject && _ZNK3sce4Json5Value5countEv(&root) == 8);
     }
+    for (const std::string invalid : {std::string("true\0false", 10), std::string("{}\0x", 4)}) {
+        Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&root, invalid.data(), invalid.size()) < 0);
+        Require(_ZNK3sce4Json5Value7getTypeEv(&root) == TypeObject && _ZNK3sce4Json5Value5countEv(&root) == 8);
+    }
+
+    Value valid{};
+    _ZN3sce4Json5ValueC1Ev(&valid);
+    const std::string whitespace = " \ttrue\r\n";
+    Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&valid, whitespace.data(), whitespace.size()) == 0);
+    Require(_ZNK3sce4Json5Value7getTypeEv(&valid) == TypeBoolean && *_ZNK3sce4Json5Value10getBooleanEv(&valid));
+    const std::string terminalNul(" \ttrue\r\n\0", 9);
+    Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&valid, terminalNul.data(), terminalNul.size()) == 0);
+    Require(_ZNK3sce4Json5Value7getTypeEv(&valid) == TypeBoolean && *_ZNK3sce4Json5Value10getBooleanEv(&valid));
+
+    const std::string escapedNul = "\"\\u0000\"";
+    Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&valid, escapedNul.data(), escapedNul.size()) == 0);
+    Require(_ZNK3sce4Json5Value7getTypeEv(&valid) == TypeString);
+    const String* parsedString = _ZNK3sce4Json5Value9getStringEv(&valid);
+    Require(_ZNK3sce4Json6String6lengthEv(parsedString) == 1 && _ZNK3sce4Json6String5c_strEv(parsedString)[0] == '\0');
+    _ZN3sce4Json5ValueD1Ev(&valid);
     for (const char* overflow : {"1e309", "[-1e309]", "{\"a\":[1,1e400]}"}) {
         bool unverified = false;
         try {

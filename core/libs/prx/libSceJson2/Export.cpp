@@ -311,7 +311,7 @@ public:
         skip();
         if (!value(out)) return false;
         skip();
-        return _text == _end || *_text == '\0';
+        return _text == _end || (_end - _text == 1 && *_text == '\0');
     }
 
 private:
