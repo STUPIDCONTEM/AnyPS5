@@ -109,12 +109,36 @@ struct TextureCache {
     std::mutex mutex;
     std::list<CachedTexture> entries;
     std::unordered_map<TextureKey, std::list<CachedTexture>::iterator, TextureKeyHash> index;
+    std::unordered_multimap<const StorageTexture*, std::list<CachedTexture>::iterator> views;
     std::uint64_t bytes = 0;
+    VkPhysicalDevice budgetDevice = VK_NULL_HANDLE;
+    std::chrono::steady_clock::time_point budgetRead{};
+    std::uint64_t budget = 0;
+    std::uint64_t reportedBudget = 0;
+    std::chrono::steady_clock::time_point reportedAt{};
 };
 
 TextureCache& Textures() {
     static TextureCache cache;
     return cache;
+}
+
+struct UncachedImages {
+    std::mutex mutex;
+    std::vector<std::weak_ptr<StorageTexture>> images;
+    std::atomic<bool> any{false};
+};
+
+UncachedImages& Uncached() {
+    static UncachedImages uncached;
+    return uncached;
+}
+
+void noteUncached(const std::shared_ptr<StorageTexture>& image) {
+    auto& uncached = Uncached();
+    std::lock_guard lock(uncached.mutex);
+    uncached.images.push_back(image);
+    uncached.any.store(true, std::memory_order_release);
 }
 
 bool TextureHashEnabled() {
@@ -135,8 +159,32 @@ std::list<CachedTexture>::iterator findTexture(TextureCache& cache, const Textur
 
 void eraseTexture(TextureCache& cache, std::list<CachedTexture>::iterator it) {
     cache.bytes -= it->accounted;
+    if (it->source != nullptr) {
+        for (auto [view, last] = cache.views.equal_range(it->source.get()); view != last; ++view) {
+            if (view->second == it) {
+                cache.views.erase(view);
+                break;
+            }
+        }
+    }
     cache.index.erase(it->key);
     cache.entries.erase(it);
+}
+
+void dropUncachedViews(TextureCache& cache) {
+    auto& uncached = Uncached();
+    if (!uncached.any.load(std::memory_order_acquire)) return;
+    std::vector<std::weak_ptr<StorageTexture>> images;
+    {
+        std::lock_guard lock(uncached.mutex);
+        images.swap(uncached.images);
+        uncached.any.store(false, std::memory_order_release);
+    }
+    for (const auto& weak : images) {
+        const auto image = weak.lock();
+        if (image == nullptr) continue;
+        for (auto view = cache.views.find(image.get()); view != cache.views.end(); view = cache.views.find(image.get())) eraseTexture(cache, view->second);
+    }
 }
 
 // Moves an entry to the front (most recently used).
@@ -212,6 +260,10 @@ void logLookup(const LookupRecord& record) {
 
 std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, std::uint32_t mip, std::uint64_t guestBytes = 0);
 
+std::uint64_t heldBytes(const StorageTexture& image) {
+    return std::max<std::uint64_t>(image.AllocationBytes(), image.GuestBytes());
+}
+
 bool MetadataMoved(const StorageTexture& image, const GuestTextureResource& resource) {
     return resource.dccAddress != 0 && image.Descriptor().dccAddress != resource.dccAddress && !image.ServesKeysAt(resource.dccAddress);
 }
@@ -279,6 +331,55 @@ std::shared_ptr<StorageTexture> sampledStorageSource(const Context& context, con
         if (failures.generations.size() < 4096 && failures.generations.emplace(surface, generation).second) std::fprintf(stderr, "[textures] sampled texture 0x%llx (%ux%u format %u) keeps the snapshot path: %s\n", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, error.what());
         return nullptr;
     }
+}
+
+std::uint64_t storageCacheBytes();
+
+std::optional<std::uint32_t> largestDeviceLocalHeap(const VkPhysicalDeviceMemoryProperties& memory) {
+    std::optional<std::uint32_t> heap;
+    for (std::uint32_t i = 0; i < std::min<std::uint32_t>(memory.memoryHeapCount, VK_MAX_MEMORY_HEAPS); ++i) {
+        if ((memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0 && (!heap || memory.memoryHeaps[i].size > memory.memoryHeaps[*heap].size)) heap = i;
+    }
+    return heap;
+}
+
+std::uint64_t forcedCacheBudget() {
+    static const std::uint64_t forced = [] {
+        const char* text = std::getenv("APS5_TEXTURE_CACHE_MIB");
+        return text != nullptr ? std::strtoull(text, nullptr, 10) << 20u : 0u;
+    }();
+    return forced;
+}
+
+std::uint64_t storageBudget(const Context& context) {
+    const auto forced = forcedCacheBudget();
+    return forced != 0 ? forced : TextureCacheBudget(context.memory);
+}
+
+std::uint64_t sampledBudget(const Context& context, TextureCache& cache) {
+    if (const auto forced = forcedCacheBudget(); forced != 0) return forced;
+    if (context.memoryProperties2 == nullptr || context.physical == VK_NULL_HANDLE) return TextureCacheBudget(context.memory);
+    const auto now = std::chrono::steady_clock::now();
+    if (cache.budgetDevice == context.physical && now - cache.budgetRead < std::chrono::seconds(1)) return cache.budget;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT reported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    properties.pNext = &reported;
+    context.memoryProperties2(context.physical, &properties);
+    const auto sampled = SampledTextureMemory();
+    const auto storage = storageCacheBytes();
+    const auto budget = SampledTextureBudget(context.memory, &reported, sampled + storage);
+    const bool fresh = cache.budgetDevice != context.physical;
+    if (const auto heap = largestDeviceLocalHeap(context.memory); heap && (fresh || SampledBudgetReportDue(cache.reportedBudget, budget, now - cache.reportedAt))) {
+        char was[48] = "";
+        if (!fresh) std::snprintf(was, sizeof(was), " (was %llu MiB)", static_cast<unsigned long long>(cache.reportedBudget >> 20u));
+        std::fprintf(stderr, "[gpu] sampled texture cache budget %llu MiB%s: device-local heap %u has a VK_EXT_memory_budget budget of %llu MiB and uses %llu MiB, %llu MiB of it sampled textures (%llu MiB in the cache) and %llu MiB cached storage images; storage image cache budget %llu MiB\n", static_cast<unsigned long long>(budget >> 20u), was, *heap, static_cast<unsigned long long>(reported.heapBudget[*heap] >> 20u), static_cast<unsigned long long>(reported.heapUsage[*heap] >> 20u), static_cast<unsigned long long>(sampled >> 20u), static_cast<unsigned long long>(cache.bytes >> 20u), static_cast<unsigned long long>(storage >> 20u), static_cast<unsigned long long>(TextureCacheBudget(context.memory) >> 20u));
+        cache.reportedBudget = budget;
+        cache.reportedAt = now;
+    }
+    cache.budgetDevice = context.physical;
+    cache.budgetRead = now;
+    cache.budget = budget;
+    return budget;
 }
 
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
@@ -387,6 +488,7 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
     auto& cache = Textures();
     const auto key = MakeTextureKey(context.device, words, components, depthCompare);
     std::lock_guard lock(cache.mutex);
+    dropUncachedViews(cache);
     if (auto it = findTexture(cache, key); it != cache.entries.end()) {
         if (it->source != nullptr) {
             // The view follows the storage image, whatever the GPU wrote to it since; guest memory
@@ -422,11 +524,11 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         eraseTexture(cache, it);
     }
     CachedTexture entry{key, address, std::vector<std::byte>(source != nullptr ? 0u : bytes), nullptr, *keys, generation};
-    entry.accounted = guestBytes;
     if (source != nullptr) {
         entry.source = source;
         entry.sourceVersion = source->Version();
         entry.texture = std::make_shared<Texture>(context, source, resource, components);
+        entry.accounted = source->Cached() ? 0u : heldBytes(*source);
         counters.fromStorage.fetch_add(1, std::memory_order_relaxed);
     } else {
         // Snapshot before the upload so a write racing with it is caught by the next comparison.
@@ -439,15 +541,17 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
             std::fprintf(stderr, "[texture] 0x%llx %ux%u format %u tile %d: %zu of %zu sampled bytes nonzero\n", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<int>(resource.tileMode), nonzero, entry.bytes.size() / 64);
         }
         entry.texture = std::make_shared<Texture>(context, *context.detiler, resource, components, entry.bytes, depthCompare);
+        entry.accounted = entry.texture->AllocationBytes();
         counters.snapshots.fetch_add(1, std::memory_order_relaxed);
     }
-    constexpr std::uint64_t budget = 2048ull << 20u;
+    const auto budget = sampledBudget(context, cache);
     while (!cache.entries.empty() && cache.bytes + entry.accounted > budget) eraseTexture(cache, std::prev(cache.entries.end()));
     cache.bytes += entry.accounted;
     auto texture = entry.texture;
     logLookup({texture.get(), resource, guestBytes, *keys, generation, source.get()});
     cache.entries.push_front(std::move(entry));
     cache.index[key] = cache.entries.begin();
+    if (source != nullptr) cache.views.emplace(source.get(), cache.entries.begin());
     reportTextureCounters();
     if (profile) LookupOutcomes::Add(source != nullptr ? LookupOutcomes::SampledMadeView : LookupOutcomes::SampledMadeSnapshot, start);
     return texture;
@@ -471,6 +575,7 @@ struct CachedStorageTexture {
     StorageKey key;
     std::uint32_t mip;
     std::shared_ptr<StorageTexture> texture;
+    std::uint64_t accounted = 0;
 };
 
 // As TextureCache: use order with a hash index by key, plus one by image for StorageImageCached.
@@ -479,12 +584,16 @@ struct StorageTextureCache {
     std::list<CachedStorageTexture> entries;
     std::unordered_map<StorageKey, std::list<CachedStorageTexture>::iterator, StorageKeyHash> index;
     std::unordered_map<const StorageTexture*, std::list<CachedStorageTexture>::iterator> byImage;
-    std::uint64_t bytes = 0;
+    std::atomic<std::uint64_t> bytes{0};
 };
 
 StorageTextureCache& StorageTextures() {
     static StorageTextureCache cache;
     return cache;
+}
+
+std::uint64_t storageCacheBytes() {
+    return StorageTextures().bytes.load(std::memory_order_relaxed);
 }
 
 std::list<CachedStorageTexture>::iterator findStorage(StorageTextureCache& cache, const StorageKey& key) {
@@ -512,8 +621,9 @@ std::list<CachedStorageTexture>::iterator findStorageByImage(StorageTextureCache
 // Evicts an entry: its pending results go to guest memory first (the image may die with the entry).
 void evictStorage(StorageTextureCache& cache, std::list<CachedStorageTexture>::iterator it) {
     it->texture->SetCached(false);
+    noteUncached(it->texture);
     it->texture->Flush();
-    cache.bytes -= it->texture->GuestBytes();
+    cache.bytes -= it->accounted;
     cache.index.erase(it->key);
     cache.byImage.erase(it->texture.get());
     cache.entries.erase(it);
@@ -609,9 +719,10 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
     // APS5_NO_KEEP_NEW_STORAGE=1 leaves the image to its cache entry alone, as before.
     static const bool keepNew = std::getenv("APS5_NO_KEEP_NEW_STORAGE") == nullptr;
     if (auto* recorder = Recorder::Active(); keepNew && recorder != nullptr && GuestMemory::GpuMutex().HeldByThisThread() && recorder->Recording()) recorder->Keep(entry.texture);
-    constexpr std::uint64_t budget = 2048ull << 20u;
-    while (!cache.entries.empty() && cache.bytes + entry.texture->GuestBytes() > budget) evictStorage(cache, std::prev(cache.entries.end()));
-    cache.bytes += entry.texture->GuestBytes();
+    entry.accounted = heldBytes(*entry.texture);
+    const auto budget = storageBudget(context);
+    while (!cache.entries.empty() && cache.bytes + entry.accounted > budget) evictStorage(cache, std::prev(cache.entries.end()));
+    cache.bytes += entry.accounted;
     auto texture = entry.texture;
     cache.entries.push_front(std::move(entry));
     cache.index[key] = cache.entries.begin();
@@ -622,6 +733,49 @@ std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std
     return texture;
 }
 
+}
+
+std::uint64_t TextureCacheBudget(const VkPhysicalDeviceMemoryProperties& memory) {
+    const auto heap = largestDeviceLocalHeap(memory);
+    return std::max<std::uint64_t>(2048ull << 20u, heap ? memory.memoryHeaps[*heap].size / 4u : 0u);
+}
+
+std::uint64_t SampledTextureBudget(const VkPhysicalDeviceMemoryProperties& memory, const VkPhysicalDeviceMemoryBudgetPropertiesEXT* reported, std::uint64_t textureBytes) {
+    const auto heap = largestDeviceLocalHeap(memory);
+    if (reported == nullptr || !heap || reported->heapBudget[*heap] == 0) return TextureCacheBudget(memory);
+    const auto budget = reported->heapBudget[*heap];
+    const auto usage = reported->heapUsage[*heap];
+    const auto reserved = usage - std::min<std::uint64_t>(usage, textureBytes) + TextureCacheBudget(memory) + budget / 8u;
+    return std::max<std::uint64_t>(2048ull << 20u, budget > reserved ? budget - reserved : 0u);
+}
+
+bool SampledBudgetReportDue(std::uint64_t reported, std::uint64_t budget, std::chrono::steady_clock::duration sinceReport) {
+    const auto change = budget > reported ? budget - reported : reported - budget;
+    return change > reported / 10u && sinceReport >= std::chrono::seconds(10);
+}
+
+TextureCacheUse TextureCacheUsage() {
+    TextureCacheUse use;
+    {
+        auto& sampled = Textures();
+        std::lock_guard lock(sampled.mutex);
+        dropUncachedViews(sampled);
+        use.sampledEntries = sampled.entries.size();
+        use.sampledBytes = sampled.bytes;
+    }
+    use.storageBytes = storageCacheBytes();
+    return use;
+}
+
+std::uint64_t SampledTextureCacheBudget(const Context& context) {
+    auto& cache = Textures();
+    std::lock_guard lock(cache.mutex);
+    return sampledBudget(context, cache);
+}
+
+std::shared_ptr<Texture> CachedSampledTexture(const Context& context, std::span<const std::uint32_t> words) {
+    const auto resource = DecodeTextureResource(words);
+    return cachedTexture(context, words, resource, ViewComponents(resource));
 }
 
 void FlushCachedTextures(VkDevice device) {
@@ -652,7 +806,8 @@ void ClearCachedTextures(VkDevice device) {
             continue;
         }
         it->texture->SetCached(false);
-        storage.bytes -= it->texture->GuestBytes();
+        noteUncached(it->texture);
+        storage.bytes -= it->accounted;
         storage.index.erase(it->key);
         storage.byImage.erase(it->texture.get());
         it = storage.entries.erase(it);
@@ -744,6 +899,7 @@ bool SameAsPreviousStorageElement(const ShaderRecompiler::DescriptorBinding& bin
 ShaderResources::ShaderResources(const Context& context, const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes) : ShaderResources(context, std::array<CompiledShader, 2>{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, static_cast<std::uint32_t>(vertex.pushConstants.size())}}}, target, indexAddress, indexBytes) {}
 
 ShaderResources::ShaderResources(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots) : context(context), guestMemory(context) {
+    drawBuild = true;
     prepareAddressBindings(shaders, snapshots);
     build(shaders, &target, indexAddress, indexBytes);
 }
@@ -808,6 +964,33 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
 }
 
 namespace {
+
+VkDescriptorSetLayout CreateSetLayout(const Context& context, std::span<const VkDescriptorSetLayoutBinding> bindings, bool updateAfterBind) {
+    std::vector<VkDescriptorBindingFlags> flags;
+    for (const auto& binding : bindings) flags.push_back(updateAfterBind && binding.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ? VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT : 0);
+    VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlags{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
+    bindingFlags.bindingCount = static_cast<std::uint32_t>(flags.size());
+    bindingFlags.pBindingFlags = flags.data();
+    VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    info.pNext = updateAfterBind ? &bindingFlags : nullptr;
+    info.flags = updateAfterBind ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT : 0;
+    info.bindingCount = static_cast<std::uint32_t>(bindings.size());
+    info.pBindings = bindings.data();
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    Check(context.Function<PFN_vkCreateDescriptorSetLayout>("vkCreateDescriptorSetLayout")(context.device, &info, nullptr, &layout), "vkCreateDescriptorSetLayout");
+    return layout;
+}
+
+VkDescriptorPool CreateSetPool(const Context& context, std::span<const VkDescriptorPoolSize> sizes, bool updateAfterBind) {
+    VkDescriptorPoolCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    info.flags = updateAfterBind ? VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT : 0;
+    info.maxSets = 1;
+    info.poolSizeCount = static_cast<std::uint32_t>(sizes.size());
+    info.pPoolSizes = sizes.data();
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    Check(context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &info, nullptr, &pool), "vkCreateDescriptorPool");
+    return pool;
+}
 
 // APS5_PROFILE_DRAW: the [resources] phase totals. Each thread accumulates its builds' phases in
 // arrays of its own and merges them into the shared totals every 1000 of its builds (and when it
@@ -889,7 +1072,8 @@ double ShaderResources::phase(BuildPhase which) {
 
 namespace {
 
-void ValidateDescriptorLayout(const Context& context, std::span<const VkDescriptorSetLayoutBinding> bindings) {
+void ValidateDescriptorLayout(const Context& context, std::span<const VkDescriptorSetLayoutBinding> bindings, bool updateAfterBind) {
+    const auto maxStageResources = updateAfterBind ? context.descriptorIndexingLimits.maxPerStageUpdateAfterBindResources : context.limits.maxPerStageResources;
     std::map<VkDescriptorType, std::uint64_t> heapTotals;
     std::map<std::pair<VkShaderStageFlags, VkDescriptorType>, std::uint64_t> stageTotals;
     std::map<VkShaderStageFlags, std::uint64_t> stageResources;
@@ -900,7 +1084,7 @@ void ValidateDescriptorLayout(const Context& context, std::span<const VkDescript
             if ((layout.stageFlags & stage) == 0u) continue;
             const auto count = stageTotals[{stage, layout.descriptorType}] += layout.descriptorCount;
             const auto all = stageResources[stage] += layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER ? 0u : layout.descriptorCount;
-            Require(all <= context.limits.maxPerStageResources, "typed heaps exceed per-stage resource capacity");
+            Require(all <= maxStageResources, "typed heaps exceed per-stage resource capacity");
             if (layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) Require(count <= context.limits.maxPerStageDescriptorSampledImages, "typed heaps exceed per-stage sampled image capacity");
             if (layout.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) Require(count <= context.limits.maxPerStageDescriptorStorageImages, "typed heaps exceed per-stage storage image capacity");
             if (layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) Require(count <= context.limits.maxPerStageDescriptorSamplers, "typed heaps exceed per-stage sampler capacity");
@@ -962,6 +1146,12 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
             std::int64_t shaderData = -1;
             const auto firstSampler = samplers.size();
             const auto firstDeferred = deferredImages.size();
+            const auto requireStageLimits = [&] {
+                if (stageStorageBuffers <= context.limits.maxPerStageDescriptorStorageBuffers && stageResources <= context.limits.maxPerStageResources) return;
+                const auto& limits = context.descriptorIndexingLimits;
+                Require(stageStorageBuffers <= limits.maxPerStageDescriptorUpdateAfterBindStorageBuffers && stageResources <= limits.maxPerStageUpdateAfterBindResources, "shader descriptors exceed per-stage limits");
+                updateAfterBind = true;
+            };
             for (const auto& binding : shader.program->bindings) {
                 Require(binding.descriptorSet == 0, "unexpected descriptor set: every shader resource must use descriptor set zero");
                 Require(occupied.insert(binding.binding).second, "duplicate shader binding");
@@ -970,7 +1160,7 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
                 const bool imageRole = binding.role == ShaderRecompiler::DescriptorRole::GuestImages || binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers;
                 if (imageRole) {
                     if (binding.kind == ShaderRecompiler::DescriptorKind::SampledImage || binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) stageResources += binding.count;
-                    Require(stageResources <= context.limits.maxPerStageResources, "shader descriptors exceed per-stage limits");
+                    requireStageLimits();
                     addImageBinding(binding, flags);
                     continue;
                 }
@@ -981,7 +1171,7 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
                 stageStorageBuffers += binding.count;
                 stageResources += binding.count;
                 storageBuffers += binding.count;
-                Require(stageStorageBuffers <= context.limits.maxPerStageDescriptorStorageBuffers && stageResources <= context.limits.maxPerStageResources, "shader descriptors exceed per-stage limits");
+                requireStageLimits();
                 Binding item{{binding.binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, binding.count, flags, nullptr}, {}};
                 if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers) {
                     Require(binding.guestDescriptor.size() == static_cast<std::uint64_t>(binding.count) * 4, "guest buffer descriptor must contain four DWORDs per array element");
@@ -1028,11 +1218,15 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
                 deferredImages[index].samplerCount = samplers.size() - firstSampler;
             }
         }
-        Require(storageBuffers <= context.limits.maxDescriptorSetStorageBuffers, "pipeline descriptors exceed device limits");
+        if (storageBuffers > context.limits.maxDescriptorSetStorageBuffers) {
+            Require(storageBuffers <= context.descriptorIndexingLimits.maxDescriptorSetUpdateAfterBindStorageBuffers, "pipeline descriptors exceed device limits");
+            updateAfterBind = true;
+        }
         timing.bindingsMs = phase(BuildPhase::Bindings);
         // For every build, locked ones included: their stage B then takes the fast path too, and the
         // collects cost the same wherever they run.
         if (precollectImages()) phase(BuildPhase::Precollect);
+        if (drawBuild && !usesBda && std::all_of(allocations.begin(), allocations.end(), [&](const Allocation& allocation) { return !allocation.guest || allocation.pushByte >= 0 || (allocation.dataAllocation >= 0 && allocation.dataByte < allocations[static_cast<std::size_t>(allocation.dataAllocation)].size); })) guestMemory.AllowAdjustedRegions();
         guestMemory.UploadPrepare(usesBda);
         timing.uploadMs = phase(BuildPhase::Upload);
         std::vector<VkDescriptorSetLayoutBinding> description;
@@ -1040,16 +1234,14 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
             description.push_back(binding.layout);
             layoutKey.insert(layoutKey.end(), {binding.layout.binding, static_cast<std::uint32_t>(binding.layout.descriptorType), binding.layout.descriptorCount, binding.layout.stageFlags});
         }
+        if (updateAfterBind) layoutKey.push_back(VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT);
         static const bool noLayoutCache = std::getenv("APS5_NO_LAYOUT_CACHE") != nullptr;
         static const bool noPoolCache = std::getenv("APS5_NO_POOL_CACHE") != nullptr;
         if (context.descriptorCache != nullptr && !noLayoutCache) {
-            _layout = context.descriptorCache->Layout(layoutKey, description);
+            _layout = context.descriptorCache->Layout(layoutKey, description, updateAfterBind);
         } else {
-            ValidateDescriptorLayout(context, description);
-            VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-            info.bindingCount = static_cast<std::uint32_t>(description.size());
-            info.pBindings = description.data();
-            Check(context.Function<PFN_vkCreateDescriptorSetLayout>("vkCreateDescriptorSetLayout")(context.device, &info, nullptr, &_layout), "vkCreateDescriptorSetLayout");
+            ValidateDescriptorLayout(context, description, updateAfterBind);
+            _layout = CreateSetLayout(context, description, updateAfterBind);
             ownsLayout = true;
         }
         if (!bindings.empty()) {
@@ -1061,16 +1253,12 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
             if (plannedStorageImages != 0) sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, plannedStorageImages});
             if (!samplers.empty()) sizes.push_back({VK_DESCRIPTOR_TYPE_SAMPLER, static_cast<std::uint32_t>(samplers.size())});
             if (context.descriptorCache != nullptr && !noPoolCache) {
-                const auto allocated = context.descriptorCache->Allocate(_layout, sizes);
+                const auto allocated = context.descriptorCache->Allocate(_layout, sizes, updateAfterBind);
                 _set = allocated.set;
                 cachePool = allocated.pool;
             }
             if (_set == VK_NULL_HANDLE) {
-                VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-                poolInfo.maxSets = 1;
-                poolInfo.poolSizeCount = static_cast<std::uint32_t>(sizes.size());
-                poolInfo.pPoolSizes = sizes.data();
-                Check(context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &poolInfo, nullptr, &pool), "vkCreateDescriptorPool");
+                pool = CreateSetPool(context, sizes, updateAfterBind);
                 VkDescriptorSetAllocateInfo allocation{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
                 allocation.descriptorPool = pool;
                 allocation.descriptorSetCount = 1;
@@ -2199,24 +2387,21 @@ DescriptorCache::DescriptorCache(const Context& context) : context(context), des
 
 DescriptorCache::~DescriptorCache() {
     for (const auto pool : pools) destroyPool(context.device, pool, nullptr);
+    for (const auto pool : updateAfterBindPools) destroyPool(context.device, pool, nullptr);
     for (const auto pool : dedicated) destroyPool(context.device, pool, nullptr);
     for (const auto& [key, layout] : layouts) destroyLayout(context.device, layout, nullptr);
 }
 
-VkDescriptorSetLayout DescriptorCache::Layout(std::span<const std::uint32_t> key, std::span<const VkDescriptorSetLayoutBinding> bindings) {
+VkDescriptorSetLayout DescriptorCache::Layout(std::span<const std::uint32_t> key, std::span<const VkDescriptorSetLayoutBinding> bindings, bool updateAfterBind) {
     std::lock_guard lock(mutex);
     std::vector<std::uint32_t> keyCopy(key.begin(), key.end());
     if (const auto found = layouts.find(keyCopy); found != layouts.end()) {
         ++stats.layoutHits;
         return found->second;
     }
-    ValidateDescriptorLayout(context, bindings);
+    ValidateDescriptorLayout(context, bindings, updateAfterBind);
     ++stats.layoutMisses;
-    VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    info.bindingCount = static_cast<std::uint32_t>(bindings.size());
-    info.pBindings = bindings.data();
-    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-    Check(context.Function<PFN_vkCreateDescriptorSetLayout>("vkCreateDescriptorSetLayout")(context.device, &info, nullptr, &layout), "vkCreateDescriptorSetLayout");
+    const auto layout = CreateSetLayout(context, bindings, updateAfterBind);
     layouts.emplace(std::move(keyCopy), layout);
     return layout;
 }
@@ -2238,10 +2423,11 @@ constexpr std::array<VkDescriptorPoolSize, 4> ChainPoolSizes{{{VK_DESCRIPTOR_TYP
 constexpr std::array<VkDescriptorPoolSize, 4> ChainPoolCreateSizes{{{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096 + 2}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 512}}};
 }
 
-DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout layout, std::span<const VkDescriptorPoolSize> sizes) {
+DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout layout, std::span<const VkDescriptorPoolSize> sizes, bool updateAfterBind) {
     bool fits = true;
     for (const auto& size : sizes) {
-        Require(size.descriptorCount <= SetDescriptorLimit(context.limits, size.type), "descriptor set exceeds the device's per-set descriptor limit");
+        const auto limit = updateAfterBind && size.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ? context.descriptorIndexingLimits.maxDescriptorSetUpdateAfterBindStorageBuffers : SetDescriptorLimit(context.limits, size.type);
+        Require(size.descriptorCount <= limit, "descriptor set exceeds the device's per-set descriptor limit");
         const auto capacity = std::find_if(ChainPoolSizes.begin(), ChainPoolSizes.end(), [&](const auto& item) { return item.type == size.type; });
         if (capacity == ChainPoolSizes.end() || size.descriptorCount > capacity->descriptorCount) fits = false;
     }
@@ -2252,12 +2438,7 @@ DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout l
     allocation.pSetLayouts = &layout;
     if (!fits) {
         dedicated.reserve(dedicated.size() + 1);
-        VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        poolInfo.maxSets = 1;
-        poolInfo.poolSizeCount = static_cast<std::uint32_t>(sizes.size());
-        poolInfo.pPoolSizes = sizes.data();
-        VkDescriptorPool pool = VK_NULL_HANDLE;
-        Check(context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &poolInfo, nullptr, &pool), "vkCreateDescriptorPool");
+        const auto pool = CreateSetPool(context, sizes, updateAfterBind);
         allocation.descriptorPool = pool;
         VkDescriptorSet set = VK_NULL_HANDLE;
         const auto result = allocate(context.device, &allocation, &set);
@@ -2272,7 +2453,8 @@ DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout l
     }
     // Newest pool first: it has the most room; a full or fragmented pool is left for its sets to
     // drain and tried again later.
-    for (auto it = pools.rbegin(); it != pools.rend(); ++it) {
+    auto& chain = updateAfterBind ? updateAfterBindPools : pools;
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
         allocation.descriptorPool = *it;
         VkDescriptorSet set = VK_NULL_HANDLE;
         const auto result = allocate(context.device, &allocation, &set);
@@ -2283,13 +2465,13 @@ DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout l
         if (result != VK_ERROR_OUT_OF_POOL_MEMORY && result != VK_ERROR_FRAGMENTED_POOL) Check(result, "vkAllocateDescriptorSets");
     }
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT | (updateAfterBind ? VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT : 0);
     poolInfo.maxSets = ChainPoolSets;
     poolInfo.poolSizeCount = static_cast<std::uint32_t>(ChainPoolCreateSizes.size());
     poolInfo.pPoolSizes = ChainPoolCreateSizes.data();
     VkDescriptorPool pool = VK_NULL_HANDLE;
     Check(context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &poolInfo, nullptr, &pool), "vkCreateDescriptorPool");
-    pools.push_back(pool);
+    chain.push_back(pool);
     ++stats.pools;
     allocation.descriptorPool = pool;
     VkDescriptorSet set = VK_NULL_HANDLE;
@@ -2554,9 +2736,9 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
             const bool unnormalized = element < binding.samplerUnnormalized.size() && binding.samplerUnnormalized[element];
             static const bool noSamplerCache = std::getenv("APS5_NO_SAMPLER_CACHE") != nullptr;
             if (context.samplerCache != nullptr && !noSamplerCache) {
-                samplers.push_back(context.samplerCache->Get(context, words, compareEnable, unnormalized));
+                samplers.push_back(context.samplerCache->Get(context, words, compareEnable, unnormalized, true));
             } else {
-                auto resource = DecodeSamplerResource(words, unnormalized);
+                auto resource = DecodeSamplerResource(words, unnormalized, true);
                 resource.compareEnable = compareEnable;
                 samplers.push_back(std::make_shared<Sampler>(context, resource));
             }
@@ -2709,6 +2891,7 @@ void ShaderResources::resolveImageBinding(const ShaderRecompiler::DescriptorBind
                 continue;
             }
             const auto resource = record != nullptr && record->decoded ? record->resource : DecodeTextureResource(words);
+            RequireDegammaFormat(resource.format, binding.imageSamplers[element], shaderSamplers);
             const bool firstLayer = binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k2DArray;
             if (!firstLayer && !MatchesGuestDimension(*binding.imageShape, resource.dimension)) throw std::runtime_error("AGC graphics: guest texture dimension disagrees with the shader's declared image shape (shape " + std::to_string(static_cast<int>(*binding.imageShape)) + ", dimension " + std::to_string(static_cast<int>(resource.dimension)) + ")");
             const VkComponentMapping components = ViewComponents(resource);
