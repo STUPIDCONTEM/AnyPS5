@@ -311,6 +311,26 @@ extern "C" char* APS5_VABI getcwd_nid_postfix(char* buffer, std::size_t size) {
       catch (const std::filesystem::filesystem_error& error) { errno = DirectoryFailure(error.code()); return nullptr; }
 }
 
+extern "C" int APS5_VABI gethostname_nid_postfix(char* name, std::size_t namelen) {
+    constexpr std::size_t HostNameCapacity = 256;
+    char host[HostNameCapacity]{};
+#ifdef _WIN32
+    DWORD size = HostNameCapacity - 1;
+    if (!GetComputerNameExA(ComputerNameDnsHostname, host, &size)) throw std::runtime_error("gethostname: the host name is unavailable");
+#else
+    if (::gethostname(host, HostNameCapacity - 1) != 0) throw std::runtime_error("gethostname: the host name is unavailable");
+#endif
+    const std::size_t required = std::strlen(host) + 1;
+    if (!name) return 0;
+    if (namelen < required) {
+        std::memcpy(name, host, namelen);
+        errno = 63;
+        return -1;
+    }
+    std::memcpy(name, host, required);
+    return 0;
+}
+
 extern "C" void NotImplemented_nid_no_patch(const char* funcName) {
     throw std::runtime_error(std::string(funcName) + " not implemented");
 }
