@@ -311,6 +311,27 @@ extern "C" char* APS5_VABI getcwd_nid_postfix(char* buffer, std::size_t size) {
       catch (const std::filesystem::filesystem_error& error) { errno = DirectoryFailure(error.code()); return nullptr; }
 }
 
+extern "C" char* APS5_VABI realpath_nid_postfix(const char* path, char* resolved) {
+    constexpr std::size_t PathMax = 1024;
+    if (!path) { errno = 22; return nullptr; }
+    if (!*path) { errno = 2; return nullptr; }
+    try {
+        auto& state = Directories();
+        std::lock_guard lock(state.mutex);
+        std::error_code error;
+        const auto canonical = std::filesystem::canonical(Resolve(state, path), error);
+        if (error) { errno = DirectoryFailure(error); return nullptr; }
+        const auto relative = canonical.lexically_relative(state.root);
+        if (relative.empty() || *relative.begin() == "..") throw std::runtime_error("realpath: the path resolves outside the guest root");
+        const auto guest = relative == "." ? std::string("/") : "/" + relative.generic_string();
+        if (guest.size() + 1 > PathMax) { errno = 63; return nullptr; }
+        if (!resolved) resolved = static_cast<char*>(GuestHeap::GuestHeapAllocate_nid_postfix(PathMax));
+        std::memcpy(resolved, guest.c_str(), guest.size() + 1);
+        return resolved;
+    } catch (const std::bad_alloc&) { errno = 12; return nullptr; }
+      catch (const std::filesystem::filesystem_error& error) { errno = DirectoryFailure(error.code()); return nullptr; }
+}
+
 extern "C" int APS5_VABI gethostname_nid_postfix(char* name, std::size_t namelen) {
     constexpr std::size_t HostNameCapacity = 256;
     char host[HostNameCapacity]{};
