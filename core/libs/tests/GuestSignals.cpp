@@ -12,6 +12,8 @@ int APS5_VABI sigaction_nid_postfix(int, const void*, void*);
 int APS5_VABI sigprocmask_nid_postfix(int, const void*, void*);
 int* APS5_VABI __error_nid_postfix();
 int APS5_VABI _is_signal_return_nid_postfix(std::uint64_t);
+int APS5_VABI kill_nid_postfix(int, int);
+int APS5_VABI getpid_nid_postfix(void);
 }
 struct GuestSignalSet {
     std::uint32_t bits[4];
@@ -105,4 +107,31 @@ int main() {
         Require(sigaction_nid_postfix(fixed, &defaults, &current) == 0 && current.handler == 0);
     }
     Require(sigaction_nid_postfix(15, nullptr, nullptr) == 0);
+
+    const int self = getpid_nid_postfix();
+    Require(kill_nid_postfix(self, 0) == 0);
+    for (int invalid : {-1, 129}) {
+        *__error_nid_postfix() = 0;
+        Require(kill_nid_postfix(self, invalid) == -1 && *__error_nid_postfix() == 22);
+    }
+    Require(signal_nid_postfix(15, Callback) == nullptr);
+    received = 0;
+    Require(kill_nid_postfix(self, 15) == 0 && received == 15);
+    Require(signal_nid_postfix(15, nullptr) == Callback);
+    for (int other : {0, -1, self + 1}) {
+        rejected = false;
+        try {
+            kill_nid_postfix(other, 0);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        Require(rejected);
+    }
+    rejected = false;
+    try {
+        kill_nid_postfix(self, 30);
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    Require(rejected);
 }
