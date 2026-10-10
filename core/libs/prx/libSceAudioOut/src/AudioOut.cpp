@@ -515,4 +515,12 @@ int APS5_VABI sceAudioOutSetMixLevelPadSpk(int handle, int mixLevel) {
     return 0;
 }
 
+int APS5_VABI sceAudioOutSysGetHdmiMonitorInfo(int type, void* info, std::uint32_t size) {
+    (void)type;
+    (void)info;
+    (void)size;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 }
