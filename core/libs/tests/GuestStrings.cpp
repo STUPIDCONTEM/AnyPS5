@@ -8,6 +8,7 @@
 
 extern "C" {
 char* APS5_VABI basename_nid_postfix(const char*);
+void* APS5_VABI memrchr_nid_postfix(const void*, int, std::size_t);
 int* APS5_VABI __error_nid_postfix();
 std::size_t APS5_VABI strnlen_nid_postfix(const char*, std::size_t);
 std::size_t APS5_VABI strnlen_s_nid_postfix(const char*, std::size_t);
@@ -122,6 +123,13 @@ int main() {
     Require(std::strcmp(basename_nid_postfix("one\\two"), "one\\two") == 0);
     const std::string longName(1024, 'x');
     Require(basename_nid_postfix(longName.c_str()) == nullptr && *__error_nid_postfix() == 63);
+    const char repeated[] = "abcabc";
+    Require(memrchr_nid_postfix(repeated, 'a', 6) == repeated + 3);
+    Require(memrchr_nid_postfix(repeated, 'a', 3) == repeated);
+    Require(memrchr_nid_postfix(repeated, 'z', 6) == nullptr);
+    Require(memrchr_nid_postfix(repeated, 'a', 0) == nullptr);
+    Require(memrchr_nid_postfix(repeated, 'c', 5) == repeated + 2);
+    Require(memrchr_nid_postfix(repeated, 0x161, 6) == repeated + 3);
     const char bounded[] = {'a', 'b', 'c'};
     Require(strnlen_nid_postfix(bounded, 0) == 0);
     Require(strnlen_nid_postfix(bounded, sizeof(bounded)) == 3);

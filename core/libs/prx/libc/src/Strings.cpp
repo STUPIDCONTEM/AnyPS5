@@ -73,6 +73,15 @@ const void* APS5_VABI memchr_nid_postfix(const void* s, int c, size_t n) {
     return std::memchr(s, c, n);
 }
 
+void* APS5_VABI memrchr_nid_postfix(const void* s, int c, size_t n) {
+    const auto* bytes = static_cast<const unsigned char*>(s);
+    const auto target = static_cast<unsigned char>(c);
+    for (std::size_t i = n; i-- > 0;) {
+        if (bytes[i] == target) return const_cast<unsigned char*>(bytes + i);
+    }
+    return nullptr;
+}
+
 int APS5_VABI strcmp_nid_postfix(const char* s1, const char* s2) {
     return std::strcmp(s1, s2);
 }
