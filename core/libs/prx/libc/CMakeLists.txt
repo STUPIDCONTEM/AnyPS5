@@ -274,7 +274,6 @@ if(BUILD_TESTING)
         set_tests_properties(guest_errors PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
-<<<<<<< HEAD
     add_test_executable(guest_syslog_tests ${LIBS_INCLUDE_DIR}/tests/GuestSyslog.cpp)
     target_include_directories(guest_syslog_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_syslog_tests PRIVATE libc)
@@ -284,18 +283,6 @@ if(BUILD_TESTING)
         set_tests_properties(guest_syslog PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
-    add_test_executable(guest_interface_tests ${LIBS_INCLUDE_DIR}/tests/GuestInterfaces.cpp)
-    target_include_directories(guest_interface_tests PRIVATE ${LIBS_INCLUDE_DIR})
-    target_link_libraries(guest_interface_tests PRIVATE libc)
-    configure_windows_unwind(guest_interface_tests)
-    add_test(NAME guest_interfaces COMMAND guest_interface_tests)
-    if(WIN32)
-        target_link_libraries(guest_interface_tests PRIVATE ws2_32 iphlpapi)
-        set_tests_properties(guest_interfaces PROPERTIES ENVIRONMENT_MODIFICATION
-            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
-    endif()
-=======
->>>>>>> a16e81a6 (refactor(libc): move the getifaddrs test and TechnicalDebt entry away from lines other pull requests change)
     add_test_executable(mspace_tests ${LIBS_INCLUDE_DIR}/tests/Mspace.cpp)
     target_include_directories(mspace_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(mspace_tests PRIVATE libc)
