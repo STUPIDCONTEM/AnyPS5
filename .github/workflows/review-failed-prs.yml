@@ -1,0 +1,52 @@
+name: Verify failed PR repairs
+on:
+  push:
+    branches: [ci/review-failed-prs]
+permissions:
+  contents: read
+jobs:
+  linux:
+    name: Linux PR ${{ matrix.pr }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: 2104
+            old: 0e8d65d7583ba092ca3c6216a5c5929d3d3be73d
+            tree: 983dde98ec152097c518bdd9232934a04d874585
+            test: guest_pthread_attr
+          - pr: 2111
+            old: 81b0142dfdeef12d405c8d4c88594dd9a7324560
+            tree: ac54d962cf4a41b89c758d840486daf1a4fecff8
+            test: guest_pthread_rwlock
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 1f0c9fef5645bbb02d82d5efd28927baca95bfd5
+          fetch-depth: 0
+          submodules: true
+      - name: Apply only the selected PR and verify exact source tree
+        shell: bash
+        run: |
+          git fetch https://github.com/boykopovar/AnyPS5.git refs/pull/${{ matrix.pr }}/head
+          test "$(git rev-parse FETCH_HEAD)" = '${{ matrix.old }}'
+          git cherry-pick --no-commit '${{ matrix.old }}'
+          test "$(git write-tree)" = '${{ matrix.tree }}'
+          git diff --cached --check
+      - name: Install Vulkan software driver
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DANYPS5_ENABLE_SPIRV_TOOLS=ON
+      - name: Check test registration
+        run: python3 tools/check_test_registration.py build
+      - name: Build default targets and guest libraries
+        run: cmake --build build --parallel 4 && cmake --build build --target libs --parallel 4
+      - name: Full regression suite
+        run: ctest --test-dir build --output-on-failure --timeout 120 --parallel 4 --output-log ctest.log
+        env:
+          ANYPS5_REQUIRE_VULKAN: 1
+          GALLIUM_OVERRIDE_CPU_CAPS: avx
+      - name: Repeat affected test
+        run: ctest --test-dir build -R '^${{ matrix.test }}$' --output-on-failure --timeout 30 --repeat until-fail:5
