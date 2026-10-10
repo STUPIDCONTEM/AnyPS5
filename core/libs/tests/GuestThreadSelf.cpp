@@ -10,6 +10,7 @@ void APS5_VABI scePthreadExit(void* retval);
 Pthread APS5_VABI scePthreadSelf();
 void APS5_VABI scePthreadTestcancel();
 void APS5_VABI pthread_testcancel_nid_postfix(void);
+int APS5_VABI pthread_setcanceltype_nid_postfix(int type, int* old_type);
 int APS5_VABI scePthreadSetcancelstate(int state, int* old_state);
 int APS5_VABI scePthreadSetcanceltype(int type, int* old_type);
 int APS5_VABI scePthreadMutexattrInit(PthreadMutexattr* attr);
@@ -44,6 +45,7 @@ static constexpr int SCE_KERNEL_ERROR_EPERM = 0x80020001;
 static constexpr int MUTEX_TYPE_RECURSIVE = 2;
 static constexpr int PTHREAD_CANCEL_ENABLE = 0;
 static constexpr int PTHREAD_CANCEL_ASYNCHRONOUS = 2;
+static constexpr int PTHREAD_CANCEL_DEFERRED = 0;
 static constexpr std::intptr_t WorkerRetval = 0x1234;
 
 static void Require(bool value) { if (!value) std::abort(); }
@@ -107,6 +109,14 @@ int main() {
     Require(context.unlockResult == SCE_KERNEL_ERROR_EPERM);
     Require(context.workerStackReported);
     Require(context.testcancelReturned);
+
+    constexpr int GuestEinval = 22;
+    int oldType = -1;
+    Require(pthread_setcanceltype_nid_postfix(1, &oldType) == GuestEinval && oldType == -1);
+    Require(pthread_setcanceltype_nid_postfix(-1, nullptr) == GuestEinval);
+    Require(pthread_setcanceltype_nid_postfix(PTHREAD_CANCEL_ASYNCHRONOUS, &oldType) == 0 && oldType == PTHREAD_CANCEL_DEFERRED);
+    Require(pthread_setcanceltype_nid_postfix(PTHREAD_CANCEL_DEFERRED, &oldType) == 0 && oldType == PTHREAD_CANCEL_ASYNCHRONOUS);
+    Require(pthread_setcanceltype_nid_postfix(PTHREAD_CANCEL_DEFERRED, nullptr) == 0);
 
     scePthreadTestcancel();
     pthread_testcancel_nid_postfix();
