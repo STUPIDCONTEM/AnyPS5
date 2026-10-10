@@ -176,6 +176,8 @@ static std::int64_t NativePwrite(int descriptor, const void* buf, std::size_t nb
 #include <dirent.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/statvfs.h>
+#include <sys/vfs.h>
 static int NativeRmdir(const std::filesystem::path& path) {
     return ::rmdir(path.c_str());
 }
@@ -754,6 +756,71 @@ int APS5_VABI futimes_nid_postfix(int d, const KernelTimeval* times) {
     }
     if (NativeFutimes(d, times) != 0) return PosixResult(SceErrorFromErrno(errno));
     return 0;
+}
+
+struct GuestFsid {
+    std::int32_t val[2];
+};
+
+struct GuestStatfs {
+    std::uint32_t f_version;
+    std::uint32_t f_type;
+    std::uint64_t f_flags;
+    std::uint64_t f_bsize;
+    std::uint64_t f_iosize;
+    std::uint64_t f_blocks;
+    std::uint64_t f_bfree;
+    std::int64_t f_bavail;
+    std::uint64_t f_files;
+    std::int64_t f_ffree;
+    std::uint64_t f_syncwrites;
+    std::uint64_t f_asyncwrites;
+    std::uint64_t f_syncreads;
+    std::uint64_t f_asyncreads;
+    std::uint64_t f_spare[10];
+    std::uint32_t f_namemax;
+    std::uint32_t f_owner;
+    GuestFsid f_fsid;
+    char f_charspare[80];
+    char f_fstypename[16];
+    char f_mntfromname[88];
+    char f_mntonname[88];
+};
+static_assert(sizeof(GuestStatfs) == 472 && offsetof(GuestStatfs, f_namemax) == 184 && offsetof(GuestStatfs, f_fsid) == 192 &&
+              offsetof(GuestStatfs, f_fstypename) == 280 && offsetof(GuestStatfs, f_mntonname) == 384);
+
+int APS5_VABI _fstatfs_nid_postfix(int d, GuestStatfs* buffer) {
+    if (buffer == nullptr) return PosixFailure(GUEST_EFAULT);
+    if (d >= GuestSockets::FirstDescriptor) return PosixFailure(GuestSockets::IsOpen(d) ? GUEST_EINVAL : GUEST_EBADF);
+#ifdef _WIN32
+    throw std::runtime_error("_fstatfs: not implemented on Windows");
+#else
+    constexpr std::uint32_t GuestStatfsVersion = 0x20030518;
+    constexpr std::uint64_t GuestMountReadOnly = 0x1;
+    constexpr std::uint64_t GuestMountSynchronous = 0x2;
+    constexpr std::uint64_t GuestMountNoExec = 0x4;
+    constexpr std::uint64_t GuestMountNoSuid = 0x8;
+    constexpr std::uint64_t GuestMountNoAtime = 0x10000000;
+    struct statfs host{};
+    if (::fstatfs(d, &host) != 0) return PosixResult(SceErrorFromErrno(errno));
+    std::memset(buffer, 0, sizeof(*buffer));
+    buffer->f_version = GuestStatfsVersion;
+    if (host.f_flags & ST_RDONLY) buffer->f_flags |= GuestMountReadOnly;
+    if (host.f_flags & ST_SYNCHRONOUS) buffer->f_flags |= GuestMountSynchronous;
+    if (host.f_flags & ST_NOEXEC) buffer->f_flags |= GuestMountNoExec;
+    if (host.f_flags & ST_NOSUID) buffer->f_flags |= GuestMountNoSuid;
+    if (host.f_flags & ST_NOATIME) buffer->f_flags |= GuestMountNoAtime;
+    buffer->f_bsize = static_cast<std::uint64_t>(host.f_bsize);
+    buffer->f_iosize = static_cast<std::uint64_t>(host.f_bsize);
+    buffer->f_blocks = static_cast<std::uint64_t>(host.f_blocks);
+    buffer->f_bfree = static_cast<std::uint64_t>(host.f_bfree);
+    buffer->f_bavail = static_cast<std::int64_t>(host.f_bavail);
+    buffer->f_files = static_cast<std::uint64_t>(host.f_files);
+    buffer->f_ffree = static_cast<std::int64_t>(host.f_ffree);
+    buffer->f_namemax = static_cast<std::uint32_t>(host.f_namelen);
+    std::memcpy(buffer->f_fsid.val, &host.f_fsid, sizeof(buffer->f_fsid.val));
+    return 0;
+#endif
 }
 
 int APS5_VABI fsync_nid_postfix(int fd) {
