@@ -149,4 +149,25 @@ int APS5_VABI msync_nid_postfix(void* address, std::size_t length, int flags) {
     return 0;
 }
 
+int APS5_VABI madvise_nid_postfix(void* address, std::size_t length, int advice) {
+    const auto failed = [](int error) {
+        SetError(error);
+        return -1;
+    };
+    constexpr int GuestMadvCore = 9;
+    constexpr int GuestMadvProtect = 10;
+    if (advice == GuestMadvProtect) throw std::runtime_error("madvise: MADV_PROTECT is not implemented");
+    if (advice < 0 || advice > GuestMadvCore) return failed(GuestInvalid);
+    constexpr std::uintptr_t mask = PS5_PAGE_SIZE - 1;
+    const auto first = reinterpret_cast<std::uintptr_t>(address);
+    if (length > std::numeric_limits<std::uintptr_t>::max() - first) return failed(GuestInvalid);
+    const auto last = first + length;
+    if (last > std::numeric_limits<std::uintptr_t>::max() - mask) return failed(GuestInvalid);
+    const auto start = first & ~mask;
+    const auto end = (last + mask) & ~mask;
+    if (start == end) return 0;
+    if (!RangeMapped(start, end)) return failed(GuestInvalid);
+    return 0;
+}
+
 }
