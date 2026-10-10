@@ -1,6 +1,8 @@
 #include "prx/libc/include/FilesystemError.hpp"
 #include "prx/libc/include/General.hpp"
 #include <cerrno>
+#include <cstdint>
+#include <stdexcept>
 #include <vector>
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -8,6 +10,7 @@
 #endif
 #include <windows.h>
 #else
+#include <sys/time.h>
 #include <unistd.h>
 #endif
 
@@ -68,6 +71,35 @@ extern "C" int APS5_VABI access_nid_postfix(const char* path, int mode) {
       catch (const std::filesystem::filesystem_error& error) {
         errno = FilesystemError(error.code()); return -1;
     }
+}
+
+struct GuestUtimbuf {
+    std::int64_t actime;
+    std::int64_t modtime;
+};
+static_assert(sizeof(GuestUtimbuf) == 16);
+
+extern "C" int APS5_VABI utime_nid_postfix(const char* path, const GuestUtimbuf* times) {
+    if (!path) { errno = 14; return -1; }
+    if (!*path) { errno = 2; return -1; }
+    try {
+        const auto resolved = ResolvePath_nid_no_patch(path);
+#ifdef _WIN32
+        (void)times;
+        throw std::runtime_error("utime: not implemented on Windows");
+#else
+        timeval values[2]{};
+        if (times) {
+            values[0].tv_sec = static_cast<time_t>(times->actime);
+            values[1].tv_sec = static_cast<time_t>(times->modtime);
+        }
+        if (::utimes(resolved.c_str(), times ? values : nullptr) != 0) {
+            errno = FilesystemError(std::error_code(errno, std::generic_category()));
+            return -1;
+        }
+        return 0;
+#endif
+    } catch (const std::bad_alloc&) { errno = 12; return -1; }
 }
 
 extern "C" int APS5_VABI remove_nid_postfix(const char* path) {
