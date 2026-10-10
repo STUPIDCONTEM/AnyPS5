@@ -45,6 +45,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Aio/src/Aio.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Coredump.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Exception.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Context.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Sanitizer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Rtld.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Process.cpp
@@ -172,6 +173,16 @@ if(BUILD_TESTING)
     add_test(NAME guest_file_timestamps COMMAND guest_file_timestamp_tests)
     if(WIN32)
         set_tests_properties(guest_file_timestamps PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_context_tests ${LIBS_INCLUDE_DIR}/tests/GuestContext.cpp)
+    target_include_directories(guest_context_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_context_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_context_tests)
+    add_test(NAME guest_context COMMAND guest_context_tests)
+    set_tests_properties(guest_context PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(guest_context PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test_executable(guest_fstatfs_tests ${LIBS_INCLUDE_DIR}/tests/GuestFstatfs.cpp)
