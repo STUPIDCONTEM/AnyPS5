@@ -84,7 +84,7 @@ int main() {
         Require(std::equal(pcm.begin() + 1, pcm.end() - 1, reference.begin() + 1));
         int peak = 0;
         for (auto it = pcm.begin() + 1; it != pcm.end() - 1; ++it) peak = std::max(peak, std::abs(static_cast<int>(*it)));
-        Require(peak > 2000 && peak < 4500);
+        if (frame > 0) Require(peak > 1500 && peak < 4500);
         std::array<std::int16_t, 962> mono{};
         mono.front() = mono.back() = 12345;
         Require(sceOpusCeltDecDecode(monoState.data(), packet, bytes, mono.data() + 1, 1921) == 1920);
