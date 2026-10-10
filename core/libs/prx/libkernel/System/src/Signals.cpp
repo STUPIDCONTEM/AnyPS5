@@ -6,6 +6,10 @@
 #include <cstdint>
 #include <mutex>
 #include <stdexcept>
+#ifndef _WIN32
+#include <pthread.h>
+#include <signal.h>
+#endif
 
 extern "C" int* APS5_VABI __error_nid_postfix();
 
@@ -155,7 +159,79 @@ int APS5_VABI sigprocmask_nid_postfix(int how, const void* set, void* previousSe
     return _sigprocmask_nid_postfix(how, static_cast<const GuestSignalSet*>(set),
                                     static_cast<GuestSignalSet*>(previousSet));
 }
+
+void APS5_VABI SignalJumpSaveMask_nid_no_patch(GuestSignalSet* saved) {
+    _sigprocmask_nid_postfix(1, nullptr, saved);
 }
+
+void APS5_VABI SignalJumpRestoreMask_nid_no_patch(const GuestSignalSet* saved) {
+    _sigprocmask_nid_postfix(3, saved, nullptr);
+#ifndef _WIN32
+    sigset_t native;
+    sigemptyset(&native);
+    for (int guest : {2, 4, 6, 8, 11, 15}) sigaddset(&native, NativeSignal(guest));
+    pthread_sigmask(SIG_UNBLOCK, &native, nullptr);
+#endif
+}
+}
+
+#ifdef _WIN32
+#define APS5_SIGNAL_JUMP_FUNCTION(name) ".globl " name "\n.def " name "; .scl 2; .type 32; .endef\n" name ":\n"
+#else
+#define APS5_SIGNAL_JUMP_FUNCTION(name) ".globl " name "\n.type " name ", @function\n" name ":\n"
+#endif
+
+asm(".text\n"
+    APS5_SIGNAL_JUMP_FUNCTION("sigsetjmp_nid_postfix")
+    "    mov (%rsp), %rax\n"
+    "    mov %rax, 0(%rdi)\n"
+    "    mov %rbx, 8(%rdi)\n"
+    "    lea 8(%rsp), %rax\n"
+    "    mov %rax, 16(%rdi)\n"
+    "    mov %rbp, 24(%rdi)\n"
+    "    mov %r12, 32(%rdi)\n"
+    "    mov %r13, 40(%rdi)\n"
+    "    mov %r14, 48(%rdi)\n"
+    "    mov %r15, 56(%rdi)\n"
+    "    stmxcsr 64(%rdi)\n"
+    "    fnstcw 68(%rdi)\n"
+    "    movl %esi, 88(%rdi)\n"
+    "    test %esi, %esi\n"
+    "    jz 1f\n"
+    "    sub $8, %rsp\n"
+    "    lea 72(%rdi), %rdi\n"
+    "    call SignalJumpSaveMask_nid_no_patch\n"
+    "    add $8, %rsp\n"
+    "1:\n"
+    "    xor %eax, %eax\n"
+    "    ret\n"
+    APS5_SIGNAL_JUMP_FUNCTION("siglongjmp_nid_postfix")
+    "    cmpl $0, 88(%rdi)\n"
+    "    je 2f\n"
+    "    push %rdi\n"
+    "    push %rsi\n"
+    "    sub $8, %rsp\n"
+    "    lea 72(%rdi), %rdi\n"
+    "    call SignalJumpRestoreMask_nid_no_patch\n"
+    "    add $8, %rsp\n"
+    "    pop %rsi\n"
+    "    pop %rdi\n"
+    "2:\n"
+    "    mov %esi, %eax\n"
+    "    test %eax, %eax\n"
+    "    jnz 3f\n"
+    "    inc %eax\n"
+    "3:\n"
+    "    mov 8(%rdi), %rbx\n"
+    "    mov 16(%rdi), %rsp\n"
+    "    mov 24(%rdi), %rbp\n"
+    "    mov 32(%rdi), %r12\n"
+    "    mov 40(%rdi), %r13\n"
+    "    mov 48(%rdi), %r14\n"
+    "    mov 56(%rdi), %r15\n"
+    "    ldmxcsr 64(%rdi)\n"
+    "    fldcw 68(%rdi)\n"
+    "    jmp *0(%rdi)\n");
 
 extern "C" {
 
