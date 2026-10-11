@@ -1,5 +1,7 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cctype>
+#include <initializer_list>
+#include <climits>
 #include <clocale>
 #include <cstdio>
 #include <cstdlib>
@@ -24,6 +26,10 @@ const short* APS5_VABI _Getptoupper_nid_postfix();
 static void Require(bool value) { if (!value) std::abort(); }
 int main() {
     Require(std::setlocale(LC_CTYPE, "C") != nullptr);
+    for (const int c : {-2, 256, 300, INT_MAX, INT_MIN}) {
+        Require(isalpha_nid_postfix(c) == 0 && isupper_nid_postfix(c) == 0 && isspace_nid_postfix(c) == 0 && isxdigit_nid_postfix(c) == 0);
+        Require(toupper_nid_postfix(c) == c && tolower_nid_postfix(c) == c);
+    }
     for (int c = EOF; c <= 255; ++c) {
         Require(bool(isupper_nid_postfix(c)) == bool(std::isupper(c)));
         Require(bool(islower_nid_postfix(c)) == bool(std::islower(c)));
